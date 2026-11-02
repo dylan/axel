@@ -1,0 +1,65 @@
+---
+title: Command line
+description: Every axel command. `axel <command> --help` has the flags.
+---
+
+`axel` with no arguments opens the launcher (inside Rex, as floating panes; elsewhere,
+inline). Run it again to close it. Everything else is a subcommand.
+
+## Agents
+
+| | |
+|---|---|
+| `axel agent new NAME [--harness claude\|codex\|opencode] [--model M] [--skills a,b\|*] [--color C] [--runtime-mode M] [--host H]` | Create an agent: key, attestation, profile. |
+| `axel agent edit NAME [--allow A] [--disallow A] [--reach nobody\|anyone] [--daily-usd N\|unlimited] [--max-depth N] [--runtime-mode M] [--host H\|local]` | Change its permissions, budget, mode or default host. |
+| `axel agent ls` · `show NAME` · `archive NAME` | List, inspect, retire. |
+
+## Threads
+
+| | |
+|---|---|
+| `axel thread new "intent" --agent NAME [--project DIR]… [--scratch] [--worktree [BRANCH]] [--host H] [--no-launch]` | A thread and its first session. |
+| `axel thread spawn THREAD --agent NAME [--host H]` | Another agent on the same thread. |
+| `axel thread resume THREAD [--agent NAME]` | A new session continuing the last harness conversation. |
+| `axel thread attach THREAD --project DIR` | Attach another project. |
+| `axel thread open THREAD` | The thread view, in this terminal. |
+| `axel thread split THREAD` | A Rex window: the conversation above, the composer below. |
+| `axel thread ls [--all]` · `show THREAD` | List, inspect. |
+| `axel thread stop THREAD` | End every live session on it. |
+| `axel thread done` · `reopen` · `archive` · `delete THREAD` | Settle, reopen, archive, delete. |
+
+Thread and session ids accept any unique prefix.
+
+## Sessions
+
+| | |
+|---|---|
+| `axel session ls [--all]` | Sessions, with their state and where they run. |
+| `axel session stop SESSION` | End one session and close its pane. |
+| `axel session move SESSION --to HOST\|local` | Move a running Claude Code session to a host, or home. |
+| `axel log SESSION [-f]` | The raw frames of a managed session. |
+
+## Messages and status
+
+| | |
+|---|---|
+| `axel send "@jude …"` | A signed message to every `@name` in the text, as you, or as `$AXEL_AGENT` from inside a session. |
+| `axel inbox [--agent NAME]` | Your inbox, or an agent's. |
+| `axel status working\|blocked\|done\|idle\|error\|clear "msg" [--kind permission\|question\|auth]` | Report a status for `$AXEL_THREAD`. |
+
+## Hosts
+
+| | |
+|---|---|
+| `axel host add TARGET` | Install Axel on a machine reachable over SSH and register it. |
+| `axel host ls` · `rm LABEL` | List, forget. |
+| `axel sync [HOST] [--follow]` | Exchange threads, conversations and job branches with hosts. Runs by itself while hosts work for you. |
+
+## Plumbing
+
+| | |
+|---|---|
+| `axel ui [--screen launch\|threads\|dashboard\|inbox]` | What the floating panes run. |
+| `axel mcp` | The MCP server, on stdio. |
+| `axel hook claude\|codex` | The hook sink; installed for you at launch. |
+| `axel doctor` | Check Rex, the keychain and the database. |

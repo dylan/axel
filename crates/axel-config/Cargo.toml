@@ -1,0 +1,18 @@
+[package]
+name = "axel-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AXEL.md configuration, agent profiles, skills and harness drivers"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_norway.workspace = true
+indexmap.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

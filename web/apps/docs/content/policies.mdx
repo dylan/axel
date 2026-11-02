@@ -1,0 +1,51 @@
+---
+title: Permissions and budgets
+description: How much an agent may do alone, what it may never do, and what it may spend.
+---
+
+Axel is built so you don't babysit agents. Each agent has a **runtime mode** for routine
+permissions, a **guard** for the things that are never routine, and a **budget**.
+
+## Runtime modes
+
+```bash
+axel agent edit aaron --runtime-mode edits
+```
+
+| Mode | |
+|---|---|
+| `autopilot` (default) | Never asks. Claude Code runs with bypass permissions, Codex with `--full-auto`. |
+| `edits` | File edits are accepted; anything else asks you. |
+| `supervised` | Asks before every action. |
+| `plan` | Read-only: it may look and propose, not change. |
+
+When an agent asks, the request appears inline in the thread view and in your inbox, with
+the file, diff or command. Answer from either place.
+
+## The guard
+
+Whatever the mode, Axel's guard hook refuses **irreversible shell commands** (the kind you
+can't take back, like wiping a directory or force-pushing over someone's branch) and tells
+the agent why. Autopilot means "don't ask about the routine", not "anything goes".
+
+## Budgets
+
+```bash
+axel agent edit aaron --daily-usd 20       # or `unlimited`, the default
+```
+
+Axel counts every session's input, output and cache tokens and estimates their cost. An
+agent past its daily budget can't be summoned again until the next day, and the refusal says
+how to raise it. The dashboard shows tokens and cost per thread and per agent, with a
+sparkline of the last hour.
+
+## Reach
+
+Which agents an agent may message and summon is a policy too. See
+[Agents working together](/messaging#who-may-reach-whom).
+
+## Where these apply
+
+Policies are enforced by Axel on your machine, and travel with every job sent to a
+[remote host](/remote-hosts), so aaron has the same permissions and budget on the Mac mini
+as on your laptop.

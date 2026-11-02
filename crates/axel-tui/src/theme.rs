@@ -1,0 +1,60 @@
+//! Restrained palette: one accent, dim text, and the seven agent colours.
+
+use axel_store::{AgentColor, StatusState};
+use ratatui::style::{Color, Modifier, Style};
+
+/// The single accent colour (titles, selection, active input).
+pub const ACCENT: Color = Color::Indexed(179);
+/// Muted text for hints, breadcrumbs and timestamps.
+pub const DIM: Color = Color::DarkGray;
+/// Errors and denied/blocked signals.
+pub const DANGER: Color = Color::Indexed(167);
+/// Success / allowed / done.
+pub const OK: Color = Color::Indexed(108);
+
+pub fn accent() -> Style {
+    Style::default().fg(ACCENT)
+}
+pub fn accent_bold() -> Style {
+    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+}
+pub fn dim() -> Style {
+    Style::default().fg(DIM)
+}
+pub fn bold() -> Style {
+    Style::default().add_modifier(Modifier::BOLD)
+}
+pub fn danger() -> Style {
+    Style::default().fg(DANGER)
+}
+pub fn ok() -> Style {
+    Style::default().fg(OK)
+}
+pub fn selected() -> Style {
+    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+}
+
+/// Map an agent colour to a terminal colour. No colour falls back to the accent.
+pub fn agent_color(color: Option<AgentColor>) -> Color {
+    match color {
+        Some(AgentColor::Purple) => Color::Magenta,
+        Some(AgentColor::Yellow) => Color::Yellow,
+        Some(AgentColor::Red) => Color::Red,
+        Some(AgentColor::Green) => Color::Green,
+        Some(AgentColor::Blue) => Color::Blue,
+        Some(AgentColor::Gray) => Color::Gray,
+        Some(AgentColor::Orange) => Color::Indexed(208),
+        None => ACCENT,
+    }
+}
+
+/// Colour for a status state.
+pub fn state_color(state: StatusState) -> Color {
+    match state {
+        StatusState::Working => ACCENT,
+        StatusState::Blocked => Color::Yellow,
+        StatusState::Done => OK,
+        StatusState::Error => DANGER,
+        StatusState::Idle => DIM,
+    }
+}

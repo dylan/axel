@@ -1,0 +1,819 @@
+//! End-to-end: `run_host` against the fake ACP agent (and, opt-in, real `goose acp`).
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use axel_acp::socket::{self, Command, Reply};
+use axel_acp::{HostConfig, run_host};
+use axel_store::{
+    Harness, ItemKind, ItemStatus, Keypair, NewSession, RuntimeMode, SessionRuntime, SessionState,
+    Store,
+};
+
+/// A `Write` that appends into a shared buffer (what the host pane would show).
+#[derive(Clone, Default)]
+struct Pane(Arc<Mutex<Vec<u8>>>);
+
+impl Write for Pane {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Pane {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+struct Fixture {
+    _dir: tempfile::TempDir,
+    db: PathBuf,
+    store: Store,
+    owner: Keypair,
+    thread_id: String,
+    session_id: String,
+    cfg: HostConfig,
+    pane: Pane,
+}
+
+fn fixture(mode: RuntimeMode, harness: Harness, initial_prompt: Option<&str>) -> Fixture {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("axel.db");
+    let store = Store::open(&db).unwrap();
+    let owner = Keypair::generate();
+    let agent = Keypair::generate();
+    let thread = store
+        .create_thread(&owner, "Ship it", "test", None)
+        .unwrap();
+    let session = store
+        .start_session(
+            &owner,
+            &NewSession {
+                thread_id: thread.id.clone(),
+                agent_pubkey: agent.public().to_base58(),
+                environment_id: "env-local".into(),
+                environment_label: "local".into(),
+                project_repo_key: None,
+                harness: harness.clone(),
+                runtime_mode: mode,
+                resumed_from: None,
+                runtime: SessionRuntime::Managed,
+            },
+        )
+        .unwrap();
+    let cwd = dir.path().join("ws");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let cfg = HostConfig {
+        session_id: session.id.clone(),
+        thread_id: thread.id.clone(),
+        agent_pubkey: agent.public().to_base58(),
+        cwd,
+        harness,
+        runtime_mode: mode,
+        disallowed_tools: vec![],
+        log_path: dir
+            .path()
+            .join("logs")
+            .join(format!("{}.jsonl", session.id)),
+        socket_path: dir.path().join("run").join(format!("{}.sock", session.id)),
+        env: vec![],
+        initial_prompt: initial_prompt.map(str::to_string),
+        initial_attachments: vec![],
+        resume_native_id: None,
+        initial_from: None,
+        mcp_servers: Vec::new(),
+        session_meta: None,
+        model: None,
+    };
+    Fixture {
+        _dir: dir,
+        db,
+        store,
+        owner,
+        thread_id: thread.id,
+        session_id: session.id,
+        cfg,
+        pane: Pane::default(),
+    }
+}
+
+fn fake_harness() -> Harness {
+    Harness::Custom(env!("CARGO_BIN_EXE_fake_acp_agent").to_string())
+}
+
+/// Run the host on its own thread (current-thread runtime) and return its join handle.
+fn spawn_host(f: &Fixture) -> std::thread::JoinHandle<anyhow::Result<()>> {
+    let cfg = f.cfg.clone();
+    let store = Store::open(&f.db).unwrap();
+    let signer = Keypair::from_secret_bytes(&f.owner.secret_bytes());
+    let pane = f.pane.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(run_host(cfg, store, signer, pane))
+    })
+}
+
+fn wait_until(what: &str, timeout: Duration, mut pred: impl FnMut() -> bool) {
+    let start = Instant::now();
+    while !pred() {
+        assert!(start.elapsed() < timeout, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+fn send_ok(path: &Path, cmd: Command) {
+    let reply = socket::send(path, &cmd).unwrap();
+    assert_eq!(reply, Reply::Ok, "{cmd:?}");
+}
+
+fn kinds(f: &Fixture) -> Vec<(ItemKind, Option<ItemStatus>)> {
+    f.store
+        .items(&f.session_id, 0, 1000)
+        .unwrap()
+        .into_iter()
+        .map(|i| (i.kind, i.status))
+        .collect()
+}
+
+#[test]
+fn supervised_session_asks_streams_and_records_turns() {
+    let f = fixture(RuntimeMode::Supervised, fake_harness(), Some("hello"));
+    let host = spawn_host(&f);
+    let sock = f.cfg.socket_path.clone();
+
+    // Turn 1 runs from the initial prompt and parks on a permission.
+    wait_until("pending permission", Duration::from_secs(20), || {
+        !f.store
+            .pending_items(Some(&f.thread_id))
+            .unwrap()
+            .is_empty()
+    });
+    let pending = f.store.pending_items(Some(&f.thread_id)).unwrap();
+    assert_eq!(pending.len(), 1);
+    let perm = &pending[0];
+    assert_eq!(perm.kind, ItemKind::Permission);
+    assert_eq!(perm.content["title"], "Bash");
+    assert_eq!(perm.content["kind"], "execute");
+    assert_eq!(perm.content["raw_input"]["command"], "cargo test");
+    assert_eq!(perm.content["options"].as_array().unwrap().len(), 3);
+    let status = socket::send(&sock, &Command::Status).unwrap();
+    assert_eq!(
+        status,
+        Reply::Status {
+            state: SessionState::Blocked,
+            turn: 1,
+            pending: 1,
+            queued: 0,
+        }
+    );
+    let live = f.store.status(&f.session_id).unwrap().unwrap();
+    assert_eq!(live.state, axel_store::StatusState::Blocked);
+    assert_eq!(live.kind, Some(axel_store::BlockedKind::Permission));
+
+    // A bad answer is refused; the good one unblocks the agent.
+    let bad = socket::send(
+        &sock,
+        &Command::Answer {
+            item_id: perm.id.clone(),
+            option_id: "nope".into(),
+        },
+    )
+    .unwrap();
+    assert!(matches!(bad, Reply::Error { .. }));
+    send_ok(
+        &sock,
+        Command::Answer {
+            item_id: perm.id.clone(),
+            option_id: "allow".into(),
+        },
+    );
+
+    wait_until("turn 1 recorded", Duration::from_secs(20), || {
+        f.store.turns(&f.thread_id).unwrap().len() == 1
+    });
+    wait_until("session idle", Duration::from_secs(5), || {
+        f.store.get_session(&f.session_id).unwrap().unwrap().state == SessionState::Idle
+    });
+
+    let items = f.store.items(&f.session_id, 0, 1000).unwrap();
+    let got = kinds(&f);
+    assert_eq!(
+        got,
+        vec![
+            (ItemKind::UserMessage, Some(ItemStatus::Completed)),
+            (ItemKind::AssistantMessage, Some(ItemStatus::Completed)),
+            (ItemKind::ToolCall, Some(ItemStatus::Completed)),
+            (ItemKind::Permission, Some(ItemStatus::Allowed)),
+            (ItemKind::AssistantMessage, Some(ItemStatus::Completed)),
+            (ItemKind::TurnEnd, Some(ItemStatus::Completed)),
+        ],
+        "{items:#?}"
+    );
+    assert_eq!(items[0].content["text"], "hello");
+    assert_eq!(items[1].content["text"], "Hello, world.");
+    let tool = &items[2];
+    assert_eq!(tool.ref_id.as_deref(), Some("call-1"));
+    assert_eq!(tool.content["title"], "Bash");
+    assert_eq!(tool.content["raw_output"], "test result: ok");
+    assert_eq!(tool.content["locations"][0]["path"], "Cargo.toml");
+    assert_eq!(items[3].content["answer"], "allow");
+    assert_eq!(items[4].content["text"], "Tests pass.");
+    assert_eq!(items[5].content["stop_reason"], "end_turn");
+    assert_eq!(items[5].content["tool_calls"], 1);
+    assert!(items.iter().all(|i| i.turn == 1));
+
+    let turns = f.store.turns(&f.thread_id).unwrap();
+    assert_eq!(turns[0].summary.ordinal, 1);
+    assert_eq!(turns[0].summary.user_text, "hello");
+    assert_eq!(turns[0].summary.assistant_text, "Hello, world.Tests pass.");
+    assert_eq!(turns[0].summary.tool_calls, 1);
+    assert_eq!(turns[0].summary.stop_reason, "end_turn");
+    assert!(turns[0].summary.duration_ms >= 0);
+
+    let session = f.store.get_session(&f.session_id).unwrap().unwrap();
+    assert_eq!(
+        session.harness_session_id.as_deref(),
+        Some("fake-session-1")
+    );
+    assert_eq!(session.socket_path.as_deref(), Some(sock.as_path()));
+
+    // Prompting while idle starts turn 2; it includes a thought.
+    send_ok(
+        &sock,
+        Command::Prompt {
+            text: "a thought".into(),
+            attachments: vec![],
+            steer: false,
+            from: None,
+        },
+    );
+    wait_until("turn 2 permission", Duration::from_secs(20), || {
+        !f.store
+            .pending_items(Some(&f.thread_id))
+            .unwrap()
+            .is_empty()
+    });
+    let perm2 = f.store.pending_items(Some(&f.thread_id)).unwrap().remove(0);
+    send_ok(
+        &sock,
+        Command::Answer {
+            item_id: perm2.id.clone(),
+            option_id: "reject".into(),
+        },
+    );
+    wait_until("turn 2 recorded", Duration::from_secs(20), || {
+        f.store.turns(&f.thread_id).unwrap().len() == 2
+    });
+    let items2: Vec<_> = f
+        .store
+        .items(&f.session_id, 0, 1000)
+        .unwrap()
+        .into_iter()
+        .filter(|i| i.turn == 2)
+        .collect();
+    assert_eq!(items2[1].kind, ItemKind::Thought);
+    assert_eq!(items2[1].content["text"], "Let me think.");
+    let perm2 = f
+        .store
+        .items(&f.session_id, 0, 1000)
+        .unwrap()
+        .into_iter()
+        .find(|i| i.id == perm2.id)
+        .unwrap();
+    assert_eq!(perm2.status, Some(ItemStatus::Denied));
+    let tool2 = items2
+        .iter()
+        .find(|i| i.kind == ItemKind::ToolCall)
+        .unwrap();
+    assert_eq!(tool2.status, Some(ItemStatus::Failed));
+
+    // Stop: the session ends, the socket goes away, the host returns.
+    send_ok(&sock, Command::Stop);
+    host.join().unwrap().unwrap();
+    let session = f.store.get_session(&f.session_id).unwrap().unwrap();
+    assert_eq!(session.state, SessionState::Ended);
+    assert_eq!(session.ended_reason.as_deref(), Some("stopped"));
+    assert!(session.socket_path.is_none());
+    assert!(!sock.exists());
+
+    // Frames were logged both ways.
+    let log = std::fs::read_to_string(&f.cfg.log_path).unwrap();
+    let frames: Vec<serde_json::Value> = log
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(
+        frames
+            .iter()
+            .any(|fr| fr["dir"] == "out" && fr["frame"]["method"] == "initialize")
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|fr| fr["dir"] == "out" && fr["frame"]["method"] == "session/prompt")
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|fr| fr["dir"] == "in" && fr["frame"]["method"] == "session/update")
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|fr| fr["dir"] == "in" && fr["frame"]["method"] == "session/request_permission")
+    );
+    assert!(frames.iter().all(|fr| fr["ts"].as_i64().unwrap() > 0));
+    let init = frames
+        .iter()
+        .find(|fr| fr["frame"]["method"] == "initialize")
+        .unwrap();
+    assert_eq!(init["frame"]["params"]["protocolVersion"], 1);
+    assert_eq!(
+        init["frame"]["params"]["clientCapabilities"]["fs"]["readTextFile"],
+        true
+    );
+    assert_eq!(
+        init["frame"]["params"]["clientCapabilities"]["fs"]["writeTextFile"],
+        true
+    );
+
+    // The pane got one line per event.
+    let pane = f.pane.text();
+    assert!(pane.contains("prompt 1"), "{pane}");
+    assert!(pane.contains("permission: Bash"), "{pane}");
+    assert!(pane.contains("turn 1 done · 1 tools"), "{pane}");
+    assert!(pane.contains("thinking"), "{pane}");
+    assert!(pane.contains("session ended: stopped"), "{pane}");
+}
+
+#[test]
+fn autopilot_allows_and_plan_denies_by_policy() {
+    // Autopilot: the permission is answered by policy, no Permission item appears.
+    let f = fixture(RuntimeMode::Autopilot, fake_harness(), Some("go"));
+    let host = spawn_host(&f);
+    wait_until("turn recorded", Duration::from_secs(20), || {
+        f.store.turns(&f.thread_id).unwrap().len() == 1
+    });
+    let items = f.store.items(&f.session_id, 0, 100).unwrap();
+    assert!(
+        items.iter().all(|i| i.kind != ItemKind::Permission),
+        "{items:#?}"
+    );
+    let tool = items.iter().find(|i| i.kind == ItemKind::ToolCall).unwrap();
+    assert_eq!(tool.status, Some(ItemStatus::Completed));
+    assert!(f.pane.text().contains("allow: Bash"), "{}", f.pane.text());
+    send_ok(&f.cfg.socket_path, Command::Stop);
+    host.join().unwrap().unwrap();
+
+    // Plan: execute is denied; the agent's tool call fails and a Denied Permission item records why.
+    let f = fixture(RuntimeMode::Plan, fake_harness(), Some("go"));
+    let host = spawn_host(&f);
+    wait_until("turn recorded", Duration::from_secs(20), || {
+        f.store.turns(&f.thread_id).unwrap().len() == 1
+    });
+    let items = f.store.items(&f.session_id, 0, 100).unwrap();
+    let perm = items
+        .iter()
+        .find(|i| i.kind == ItemKind::Permission)
+        .unwrap();
+    assert_eq!(perm.status, Some(ItemStatus::Denied));
+    assert!(
+        perm.content["reason"]
+            .as_str()
+            .unwrap()
+            .contains("plan mode")
+    );
+    let tool = items.iter().find(|i| i.kind == ItemKind::ToolCall).unwrap();
+    assert_eq!(tool.status, Some(ItemStatus::Failed));
+    send_ok(&f.cfg.socket_path, Command::Stop);
+    host.join().unwrap().unwrap();
+}
+
+#[test]
+fn fs_methods_serve_the_workspace() {
+    let f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+    std::fs::write(f.cfg.cwd.join("notes.txt"), "line one\nline two\n").unwrap();
+    let host = spawn_host(&f);
+    let sock = f.cfg.socket_path.clone();
+    wait_until("socket", Duration::from_secs(10), || sock.exists());
+    wait_until("idle after setup", Duration::from_secs(10), || {
+        f.store.get_session(&f.session_id).unwrap().unwrap().state == SessionState::Idle
+    });
+
+    send_ok(
+        &sock,
+        Command::Prompt {
+            text: "readfile:notes.txt".into(),
+            attachments: vec![],
+            steer: false,
+            from: None,
+        },
+    );
+    wait_until("turn 1", Duration::from_secs(20), || {
+        f.store.turns(&f.thread_id).unwrap().len() == 1
+    });
+    let turns = f.store.turns(&f.thread_id).unwrap();
+    assert_eq!(
+        turns[0].summary.assistant_text,
+        "file says: line one\nline two\n"
+    );
+
+    send_ok(
+        &sock,
+        Command::Prompt {
+            text: "writefile:out/hello.txt:hi there".into(),
+            attachments: vec![],
+            steer: false,
+            from: None,
+        },
+    );
+    wait_until("turn 2", Duration::from_secs(20), || {
+        f.store.turns(&f.thread_id).unwrap().len() == 2
+    });
+    assert_eq!(
+        std::fs::read_to_string(f.cfg.cwd.join("out/hello.txt")).unwrap(),
+        "hi there"
+    );
+
+    send_ok(&sock, Command::Stop);
+    host.join().unwrap().unwrap();
+
+    // Plan mode refuses writes.
+    let f = fixture(
+        RuntimeMode::Plan,
+        fake_harness(),
+        Some("writefile:nope.txt:x"),
+    );
+    let host = spawn_host(&f);
+    wait_until("turn", Duration::from_secs(20), || {
+        f.store.turns(&f.thread_id).unwrap().len() == 1
+    });
+    assert_eq!(
+        f.store.turns(&f.thread_id).unwrap()[0]
+            .summary
+            .assistant_text,
+        "write denied"
+    );
+    assert!(!f.cfg.cwd.join("nope.txt").exists());
+    send_ok(&f.cfg.socket_path, Command::Stop);
+    host.join().unwrap().unwrap();
+}
+
+#[test]
+fn attachments_become_prompt_blocks_and_land_on_the_item() {
+    let f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+    let png = f.cfg.cwd.join("shot.png");
+    std::fs::write(&png, b"\x89PNGdata").unwrap();
+    let md = f.cfg.cwd.join("notes.md");
+    std::fs::write(&md, "# notes").unwrap();
+    let host = spawn_host(&f);
+    let sock = f.cfg.socket_path.clone();
+    wait_until("idle after setup", Duration::from_secs(10), || {
+        f.store.get_session(&f.session_id).unwrap().unwrap().state == SessionState::Idle
+    });
+    send_ok(
+        &sock,
+        Command::Prompt {
+            text: "see these".into(),
+            attachments: vec![png.clone(), md.clone()],
+            steer: false,
+            from: None,
+        },
+    );
+    wait_until("turn", Duration::from_secs(20), || {
+        f.store.turns(&f.thread_id).unwrap().len() == 1
+    });
+    send_ok(&sock, Command::Stop);
+    host.join().unwrap().unwrap();
+
+    let user = f
+        .store
+        .items(&f.session_id, 0, 100)
+        .unwrap()
+        .into_iter()
+        .find(|i| i.kind == ItemKind::UserMessage)
+        .unwrap();
+    assert_eq!(user.content["text"], "see these");
+    assert_eq!(
+        user.content["attachments"],
+        serde_json::json!([png.display().to_string(), md.display().to_string()])
+    );
+
+    let log = std::fs::read_to_string(&f.cfg.log_path).unwrap();
+    let prompt = log
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .find(|fr| fr["frame"]["method"] == "session/prompt")
+        .unwrap();
+    let blocks = prompt["frame"]["params"]["prompt"]
+        .as_array()
+        .unwrap()
+        .clone();
+    // The fake agent advertises image support, so the png is inlined.
+    assert_eq!(blocks.len(), 4, "{blocks:#?}");
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[0]["text"], "see these");
+    assert_eq!(blocks[1]["type"], "image");
+    assert_eq!(blocks[1]["mimeType"], "image/png");
+    assert_eq!(blocks[1]["data"], "iVBOR2RhdGE=");
+    assert_eq!(blocks[2]["type"], "resource_link");
+    assert_eq!(blocks[2]["uri"], format!("file://{}", md.display()));
+    assert_eq!(blocks[2]["name"], "notes.md");
+    assert_eq!(blocks[2]["mimeType"], "text/markdown");
+    assert_eq!(blocks[3]["type"], "text");
+    assert_eq!(
+        blocks[3]["text"],
+        format!("Attached files:\n- {}\n- {}", png.display(), md.display())
+    );
+}
+
+#[test]
+fn cancel_ends_the_turn_as_cancelled() {
+    let f = fixture(RuntimeMode::Autopilot, fake_harness(), Some("sleep"));
+    let host = spawn_host(&f);
+    let sock = f.cfg.socket_path.clone();
+    wait_until("running", Duration::from_secs(10), || {
+        matches!(
+            socket::send(&sock, &Command::Status),
+            Ok(Reply::Status {
+                state: SessionState::Running,
+                turn: 1,
+                ..
+            })
+        )
+    });
+    send_ok(&sock, Command::Cancel);
+    wait_until("turn recorded", Duration::from_secs(20), || {
+        f.store.turns(&f.thread_id).unwrap().len() == 1
+    });
+    assert_eq!(
+        f.store.turns(&f.thread_id).unwrap()[0].summary.stop_reason,
+        "cancelled"
+    );
+    let end = f
+        .store
+        .items(&f.session_id, 0, 100)
+        .unwrap()
+        .into_iter()
+        .find(|i| i.kind == ItemKind::TurnEnd)
+        .unwrap();
+    assert_eq!(end.status, Some(ItemStatus::Cancelled));
+    assert!(
+        f.pane.text().contains("turn 1 cancelled"),
+        "{}",
+        f.pane.text()
+    );
+    send_ok(&sock, Command::Stop);
+    host.join().unwrap().unwrap();
+}
+
+#[test]
+fn adapter_exit_ends_the_session() {
+    // `true` exits immediately without speaking ACP: initialize fails, the session ends.
+    let f = fixture(RuntimeMode::Autopilot, Harness::Custom("true".into()), None);
+    let host = spawn_host(&f);
+    host.join().unwrap().unwrap();
+    let session = f.store.get_session(&f.session_id).unwrap().unwrap();
+    assert_eq!(session.state, SessionState::Ended);
+    let reason = session.ended_reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains("setup failed")
+            || reason.contains("adapter exited")
+            || reason.contains("connection error"),
+        "{session:?}"
+    );
+    assert!(!f.cfg.socket_path.exists());
+}
+
+#[test]
+fn missing_adapter_is_an_error() {
+    let f = fixture(
+        RuntimeMode::Autopilot,
+        Harness::Custom("definitely-not-a-real-adapter-xyz".into()),
+        None,
+    );
+    let host = spawn_host(&f);
+    let err = host.join().unwrap().unwrap_err();
+    assert!(err.to_string().contains("failed to spawn adapter"), "{err}");
+}
+
+/// `AXEL_ACP_REAL=1 cargo test -p axel-acp real_goose -- --ignored --nocapture` with `goose` on PATH.
+#[test]
+#[ignore = "needs goose on PATH and AXEL_ACP_REAL=1"]
+fn real_goose_smoke() {
+    if std::env::var("AXEL_ACP_REAL").as_deref() != Ok("1") {
+        eprintln!("AXEL_ACP_REAL != 1; skipping");
+        return;
+    }
+    if std::process::Command::new("goose")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("goose not on PATH; skipping");
+        return;
+    }
+    let f = fixture(
+        RuntimeMode::Plan,
+        Harness::Custom("goose".into()),
+        Some("Reply with exactly the word pong and nothing else."),
+    );
+    let host = spawn_host(&f);
+    wait_until("a turn", Duration::from_secs(180), || {
+        f.store.turns(&f.thread_id).unwrap().len() == 1
+    });
+    let turns = f.store.turns(&f.thread_id).unwrap();
+    eprintln!(
+        "goose said: {:?} ({})",
+        turns[0].summary.assistant_text, turns[0].summary.stop_reason
+    );
+    assert!(
+        f.store
+            .items(&f.session_id, 0, 100)
+            .unwrap()
+            .iter()
+            .any(|i| i.kind == ItemKind::AssistantMessage)
+    );
+    send_ok(&f.cfg.socket_path, Command::Stop);
+    host.join().unwrap().unwrap();
+    eprintln!("{}", f.pane.text());
+}
+
+fn queued_texts(f: &Fixture) -> Vec<String> {
+    f.store
+        .items(&f.session_id, 0, 1000)
+        .unwrap()
+        .into_iter()
+        .filter(|i| i.kind == ItemKind::UserMessage && i.status == Some(ItemStatus::Pending))
+        .map(|i| i.content["text"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+fn user_texts(f: &Fixture) -> Vec<(String, Option<ItemStatus>)> {
+    f.store
+        .items(&f.session_id, 0, 1000)
+        .unwrap()
+        .into_iter()
+        .filter(|i| i.kind == ItemKind::UserMessage)
+        .map(|i| (i.content["text"].as_str().unwrap_or_default().to_string(), i.status))
+        .collect()
+}
+
+#[test]
+fn prompts_sent_mid_turn_queue_and_steer_interrupts() {
+    let f = fixture(RuntimeMode::Autopilot, fake_harness(), Some("sleep"));
+    let host = spawn_host(&f);
+    let sock = f.cfg.socket_path.clone();
+    wait_until("running", Duration::from_secs(10), || {
+        matches!(
+            socket::send(&sock, &Command::Status),
+            Ok(Reply::Status { state: SessionState::Running, turn: 1, .. })
+        )
+    });
+    let prompt = |text: &str, steer: bool| {
+        socket::send(&sock, &Command::Prompt { text: text.into(), attachments: vec![], steer, from: None }).unwrap()
+    };
+    // Two prompts mid-turn are queued as pending user messages, in order.
+    let Reply::Queued { .. } = prompt("sleep", false) else { panic!("expected queued") };
+    let Reply::Queued { item_id: second } = prompt("hello later", false) else { panic!("expected queued") };
+    let Reply::Queued { item_id: dropped } = prompt("never mind", false) else { panic!("expected queued") };
+    assert_eq!(queued_texts(&f), vec!["sleep", "hello later", "never mind"]);
+    assert!(matches!(socket::send(&sock, &Command::Status), Ok(Reply::Status { queued: 3, .. })));
+
+    // Dequeue removes one; unknown ids are refused.
+    send_ok(&sock, Command::Dequeue { item_id: dropped.clone() });
+    assert_eq!(queued_texts(&f), vec!["sleep", "hello later"]);
+    assert!(matches!(socket::send(&sock, &Command::Dequeue { item_id: dropped }), Ok(Reply::Error { .. })));
+
+    // Steering the second one cancels turn 1 and runs it next, ahead of the first.
+    send_ok(&sock, Command::Steer { item_id: second });
+    wait_until("steered turn", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 2);
+    let turns = f.store.turns(&f.thread_id).unwrap();
+    assert_eq!(turns[0].summary.stop_reason, "cancelled");
+    assert_eq!(turns[1].summary.user_text, "hello later");
+    assert_eq!(turns[1].summary.stop_reason, "end_turn");
+
+    // The remaining queued prompt starts by itself once the steered turn ends.
+    wait_until("queued turn running", Duration::from_secs(20), || {
+        matches!(
+            socket::send(&sock, &Command::Status),
+            Ok(Reply::Status { state: SessionState::Running, turn: 3, queued: 0, .. })
+        )
+    });
+    assert!(queued_texts(&f).is_empty());
+    // Placeholders are replaced by the real message at turn start, so the order is the run order.
+    assert_eq!(
+        user_texts(&f),
+        vec![
+            ("sleep".into(), Some(ItemStatus::Completed)),
+            ("hello later".into(), Some(ItemStatus::Completed)),
+            ("sleep".into(), Some(ItemStatus::Completed)),
+        ]
+    );
+
+    // A steer prompt from the composer jumps the queue and interrupts; a queued
+    // prompt left behind at stop is kept as cancelled.
+    let Reply::Queued { .. } = prompt("left behind", false) else { panic!("expected queued") };
+    let Reply::Queued { .. } = prompt("sleep", true) else { panic!("expected queued") };
+    wait_until("turn 4 running", Duration::from_secs(20), || {
+        matches!(
+            socket::send(&sock, &Command::Status),
+            Ok(Reply::Status { state: SessionState::Running, turn: 4, queued: 1, .. })
+        )
+    });
+    assert_eq!(f.store.turns(&f.thread_id).unwrap()[2].summary.stop_reason, "cancelled");
+    send_ok(&sock, Command::Stop);
+    host.join().unwrap().unwrap();
+    assert!(user_texts(&f).contains(&("left behind".into(), Some(ItemStatus::Cancelled))), "{:?}", user_texts(&f));
+    assert!(queued_texts(&f).is_empty(), "nothing stays pending after the host stops");
+}
+
+#[test]
+fn set_mode_mid_session_reaches_policy_writes_and_the_session_row() {
+    let f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+    let host = spawn_host(&f);
+    let sock = f.cfg.socket_path.clone();
+    wait_until("idle after setup", Duration::from_secs(10), || {
+        f.store.get_session(&f.session_id).unwrap().unwrap().state == SessionState::Idle
+    });
+    send_ok(&sock, Command::SetMode { mode: RuntimeMode::Plan });
+    wait_until("mode recorded", Duration::from_secs(10), || {
+        f.store.get_session(&f.session_id).unwrap().unwrap().runtime_mode == RuntimeMode::Plan
+    });
+    send_ok(
+        &sock,
+        Command::Prompt { text: "writefile:nope.txt:x".into(), attachments: vec![], steer: false, from: None },
+    );
+    wait_until("turn", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+    assert_eq!(f.store.turns(&f.thread_id).unwrap()[0].summary.assistant_text, "write denied");
+    assert!(!f.cfg.cwd.join("nope.txt").exists());
+    // And back: writes work again.
+    send_ok(&sock, Command::SetMode { mode: RuntimeMode::Autopilot });
+    send_ok(
+        &sock,
+        Command::Prompt { text: "writefile:yes.txt:ok".into(), attachments: vec![], steer: false, from: None },
+    );
+    wait_until("turn 2", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 2);
+    assert_eq!(std::fs::read_to_string(f.cfg.cwd.join("yes.txt")).unwrap(), "ok");
+    send_ok(&sock, Command::Stop);
+    host.join().unwrap().unwrap();
+}
+
+#[test]
+fn agent_models_resolve_against_the_adapters_list() {
+    use axel_acp::resolve_model;
+    let listed: Vec<serde_json::Value> = serde_json::from_str(
+        r#"[{"modelId":"default","name":"Default (recommended)"},{"modelId":"opus","name":"Opus 5.5"},
+            {"modelId":"claude-opus-5","name":"Opus 5"},{"modelId":"fable","name":"Fable 5.1"},
+            {"modelId":"haiku","name":"Haiku 5.5"}]"#,
+    )
+    .unwrap();
+    assert_eq!(resolve_model("fable", &listed).as_deref(), Some("fable"));
+    assert_eq!(resolve_model("Fable", &listed).as_deref(), Some("fable"), "any case");
+    assert_eq!(resolve_model("opus 5", &listed).as_deref(), Some("claude-opus-5"), "by display name");
+    assert_eq!(resolve_model("opus", &listed).as_deref(), Some("opus"), "exact id before a substring");
+    assert_eq!(resolve_model("Fable 5.1", &listed).as_deref(), Some("fable"));
+    assert_eq!(resolve_model("claude-fable-5-1", &listed), None, "unlisted ids go through unchanged");
+}
+
+#[test]
+fn prompts_from_another_agent_are_framed_for_the_agent_and_tagged_on_the_item() {
+    let f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+    let host = spawn_host(&f);
+    let sock = f.cfg.socket_path.clone();
+    wait_until("idle after setup", Duration::from_secs(10), || {
+        f.store.get_session(&f.session_id).unwrap().unwrap().state == SessionState::Idle
+    });
+    let from = axel_acp::socket::Sender { pubkey: "PKjude".into(), name: "jude".into() };
+    send_ok(
+        &sock,
+        Command::Prompt { text: "can you check auth.rs?".into(), attachments: vec![], steer: false, from: Some(from) },
+    );
+    wait_until("turn", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+    // The thread shows the message as written, tagged with its sender.
+    let item = f
+        .store
+        .thread_items(&f.thread_id, 100)
+        .unwrap()
+        .into_iter()
+        .find(|it| it.kind == ItemKind::UserMessage)
+        .unwrap();
+    assert_eq!(item.content["text"], "can you check auth.rs?");
+    assert_eq!(item.content["from"], "PKjude");
+    // The agent reads who wrote it and how to answer.
+    let log = std::fs::read_to_string(&f.cfg.log_path).unwrap();
+    assert!(log.contains("Message from jude, another Axel agent"), "{log}");
+    assert!(log.contains(r#"axel send \"@jude <your reply>\""#), "{log}");
+    send_ok(&sock, Command::Stop);
+    host.join().unwrap().unwrap();
+}

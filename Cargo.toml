@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+default-members = ["crates/axel"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/lgalabru/axel"
+description = "Axel: a terminal-first workbench for coding agents, built on Rex"
+
+[workspace.dependencies]
+axel-identity = { path = "crates/axel-identity" }
+axel-inbox = { path = "crates/axel-inbox" }
+axel-config = { path = "crates/axel-config" }
+axel-store = { path = "crates/axel-store" }
+axel-rex = { path = "crates/axel-rex" }
+axel-tui = { path = "crates/axel-tui" }
+axel-acp = { path = "crates/axel-acp" }
+axel-mcp = { path = "crates/axel-mcp" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_norway = "0.9"
+clap = { version = "4.5", features = ["derive", "env"] }
+dirs = "6"
+chrono = { version = "0.4", features = ["serde"] }
+ulid = { version = "1", features = ["serde"] }
+ed25519-dalek = { version = "3", features = ["rand_core", "zeroize"] }
+getrandom = "0.4"
+sha2 = "0.11"
+bs58 = "0.5"
+zeroize = { version = "1", features = ["derive"] }
+keyring = { version = "3", features = ["apple-native", "sync-secret-service"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+ratatui = "0.30"
+crossterm = "0.29"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time"] }
+base64 = "0.23"
+indexmap = { version = "2", features = ["serde"] }
+tempfile = "3"
+libc = "0.2"
+rmcp = { version = "3.5", features = ["server", "transport-io", "schemars"] }
+schemars = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

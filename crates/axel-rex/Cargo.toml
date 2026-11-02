@@ -1,0 +1,12 @@
+[package]
+name = "axel-rex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rex terminal client for Axel: floating layers, windows, labels, OSC 7501 status"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+base64.workspace = true

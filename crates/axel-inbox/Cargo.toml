@@ -1,0 +1,15 @@
+[package]
+name = "axel-inbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Signed message envelopes, kinds, threading and mention resolution for Axel"
+
+[dependencies]
+axel-identity.workspace = true
+ed25519-dalek.workspace = true
+sha2.workspace = true
+bs58.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

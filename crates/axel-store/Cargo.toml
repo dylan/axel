@@ -1,0 +1,20 @@
+[package]
+name = "axel-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQLite store for Axel: environments, projects, agents, threads, messages, inbox"
+
+[dependencies]
+axel-identity.workspace = true
+axel-inbox.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ulid.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

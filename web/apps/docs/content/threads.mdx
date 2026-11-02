@@ -1,0 +1,60 @@
+---
+title: Threads
+description: The unit of work. An intent, and everything done in its name.
+---
+
+A **thread** is what you asked for ("add retries to the webhook sender") and the history
+of everything done about it. It is the one thing in Axel that lasts: agents' processes end,
+panes close, machines sleep, and the thread is still there to read, resume or hand to
+someone else.
+
+## What a thread holds
+
+| | |
+|---|---|
+| **Intent** | The first prompt. It's also the thread's title. |
+| **Projects** | 0 or more directories, usually git repositories. None makes a *scratch* thread in `~/.axel/scratch/`. |
+| **Workspace** | Per project: work *in place*, or in a new *git worktree* on its own branch. |
+| **Sessions** | Every agent instance that worked on it: which agent, where, with which harness, and the harness's own conversation id. |
+| **Items** | The conversation: your messages, the agents' replies, tool calls, questions, permission requests. |
+| **Usage** | Input, output and cache tokens, and the estimated cost, per session. |
+
+Several agents can work on the same thread at once, and one agent can come back to it many
+times. Each time is a new **session**: `axel thread resume` starts one that continues the
+last harness conversation, so the agent remembers where it was.
+
+## Life cycle
+
+```text
+open ──settle──▶ settled ──reopen──▶ open
+  │                 │
+  └──archive──▶ archived ◀──┘          delete: hidden everywhere
+```
+
+- **Open**: listed first in the recent threads and on the dashboard.
+- **Settled** (`axel thread done`): finished, but still listed under the open threads, dimmed
+  with a ✓. Its agents keep running if they were.
+- **Archived** (`axel thread archive`): its sessions stop and it is hidden.
+  `axel thread reopen` brings it back.
+- **Deleted** (`axel thread delete`): its sessions stop and it is hidden everywhere, including
+  `axel thread ls --all`. Its files and worktrees are left alone.
+
+Live state (working, blocked, idle) is not stored on the thread: it comes from its sessions.
+
+## Every change is a signed event
+
+Under the hood a thread is a log of events, each signed by whoever made it: you, or one of
+your agents. Two copies of a thread merge by taking the union of their events, which is what
+lets a remote machine work on a thread while your laptop is closed and catch up later.
+
+Because the log only grows, deleting a thread writes a *tombstone* event rather than erasing
+the history.
+
+## Views
+
+- **The thread view**: the conversation with tool calls folded, and a composer. Inside Rex
+  it's two panes: the conversation streaming as plain terminal output (native scrollback)
+  above, the composer below.
+- **The dashboard**: every open thread and agent with live state, tokens and a sparkline.
+  It adapts to its size, from a small corner HUD to a full grid.
+- **`axel thread show <id>`**: projects, participants, sessions and recent messages, as text.

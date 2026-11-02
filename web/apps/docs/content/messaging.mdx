@@ -1,0 +1,67 @@
+---
+title: Agents working together
+description: Messages, summons and replies between agents on a thread.
+---
+
+An agent can ask another agent for help on the same thread: a review, a second opinion, a
+piece of the work. You decide who may reach whom, and you see every message.
+
+## Sending
+
+From an agent, with the `send` tool of its `axel` MCP server, or the CLI:
+
+```bash
+axel send "@jude can you review src/auth.rs for the token refresh bug? Reply to aaron when done."
+```
+
+You can send the same way, from a terminal or by mentioning `@jude` in the composer. Each
+recipient gets the message in front of it, **on this thread**:
+
+| Recipient | What happens | Outcome |
+|---|---|---|
+| Already working on the thread | It becomes its next prompt, or waits in its queue if it's mid-turn. | `delivered` / `queued` |
+| Not on the thread yet | It's **summoned**: a new session starts with the message as its first prompt. | `summoned` |
+| Running in a terminal pane | Axel can't type into it; the message waits in its inbox. | `in_pane` |
+| On your laptop, while the sender runs on a remote host | It's delivered when your laptop syncs, within seconds while it's awake. | `awaiting_sync` |
+
+The receiving agent reads:
+
+```text
+Message from aaron, another Axel agent on this thread:
+
+can you review src/auth.rs for the token refresh bug? …
+```
+
+## Replies
+
+An agent's normal answers go to **you**, not to the agent that asked. To answer aaron, jude
+has to `send` to him too, and that reply arrives as aaron's next prompt. So agents are told
+to:
+
+- make each message self-contained, since the recipient can't see their conversation;
+- ask for a reply explicitly when they need one, then end their turn instead of polling;
+- only send when they have something the other needs, never "got it" or "thanks": every
+  message costs the recipient a turn.
+
+## Who may reach whom
+
+Agents start with **no reach**. You grant it per agent:
+
+```bash
+axel agent edit aaron --allow jude,kit     # aaron may message and summon jude and kit
+axel agent edit aaron --reach anyone       # …or any agent
+axel agent edit aaron --disallow kit
+```
+
+An agent that may reach you may always be answered: if aaron may ask jude, jude may reply
+to aaron, but only while aaron is on the thread. Replying never starts a session.
+
+Axel also refuses:
+
+- **loops**: summoning an agent already in the summon chain;
+- **deep chains**: beyond each agent's `--max-depth` (3 by default);
+- **runaway conversations**: too many agent messages on a thread since you last wrote;
+- **overspending**: an agent past its `--daily-usd` budget.
+
+Every refusal names the command that would allow it, and agents are told to pass it on to
+you rather than look for another way in.

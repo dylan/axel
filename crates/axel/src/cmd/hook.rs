@@ -1,0 +1,318 @@
+//! Ingest harness hook events. Reads one JSON object from stdin, then:
+//!
+//! 1. mirrors the state to Rex through OSC 7501 (tab indicators),
+//! 2. records a status row and the thread state,
+//! 3. posts a `question` / `permission_request` message when a human is needed,
+//! 4. adds token usage from the harness transcript,
+//! 5. for `PreToolUse`, acts as the autopilot **guard**: denies a short list of
+//!    irreversible actions and lets everything else through.
+
+use std::io::Read;
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+use axel_inbox::{EnvelopeBuilder, kind};
+use axel_rex::osc;
+use axel_store::{SessionState, SessionUpdate, StatusReport};
+use serde_json::Value;
+
+use super::{Ctx, convert, launch, usage};
+use crate::cli::HarnessArg;
+
+pub fn run(harness: HarnessArg, guard_only: bool) -> Result<()> {
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let event: Value = serde_json::from_str(input.trim()).unwrap_or(Value::Null);
+    let (Ok(thread_id), Ok(session_id)) = (std::env::var("AXEL_THREAD"), std::env::var("AXEL_SESSION")) else {
+        // Not launched by Axel: stay silent so hooks are harmless elsewhere.
+        return Ok(());
+    };
+    let agent_pk = std::env::var("AXEL_AGENT").unwrap_or_default();
+    let model = std::env::var("AXEL_MODEL").ok().filter(|m| !m.is_empty());
+    let ctx = Ctx::open()?;
+    // A session Axel doesn't know (stale env, other machine's DB): stay silent.
+    let Some(session) = ctx.store.get_session(&session_id)? else { return Ok(()) };
+    // Everything below is signed by the agent; without its key we can only watch.
+    let Some(agent_kp) = agent_key(&ctx, &agent_pk)? else { return Ok(()) };
+
+    // Learn the harness's own session id (for --resume) and transcript path once.
+    if harness == HarnessArg::Claude {
+        let hs = event.get("session_id").and_then(|s| s.as_str()).map(String::from);
+        let tp = event.get("transcript_path").and_then(|s| s.as_str()).map(String::from);
+        if (hs.is_some() && session.harness_session_id.is_none()) || (tp.is_some() && session.transcript_path.is_none()) {
+            ctx.store.update_session(&agent_kp, &session_id, &SessionUpdate { harness_session_id: hs, transcript_path: tp, ..Default::default() })?;
+        }
+    } else if let Some(tid) = event.get("thread-id").and_then(|t| t.as_str())
+        && session.harness_session_id.is_none() {
+            ctx.store.update_session(&agent_kp, &session_id, &SessionUpdate { harness_session_id: Some(tid.to_string()), ..Default::default() })?;
+        }
+
+    // Guard first: a denied tool never changes status.
+    if harness == HarnessArg::Claude && event.get("hook_event_name").and_then(|n| n.as_str()) == Some("PreToolUse")
+        && let Some(reason) = guard::deny_reason(&event, &disallowed_tools()) {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": format!("axel guard: {reason}")
+                    }
+                })
+            );
+            post_note(&ctx, &thread_id, &session_id, &agent_kp, &format!("guard denied: {reason}"))?;
+            return Ok(());
+        }
+    if guard_only {
+        // Managed sessions: the ACP host records status, usage and permissions itself.
+        return Ok(());
+    }
+
+    let mapped = match harness {
+        HarnessArg::Claude => map_claude(&event),
+        HarnessArg::Codex => map_codex(&event),
+    };
+
+    // Token usage, even for events we don't otherwise map.
+    match harness {
+        HarnessArg::Claude => {
+            let name = event.get("hook_event_name").and_then(|n| n.as_str()).unwrap_or("");
+            if matches!(name, "PostToolUse" | "Stop" | "SubagentStop" | "SessionEnd")
+                && let Some(path) = event.get("transcript_path").and_then(|p| p.as_str())
+                    && let Err(e) = usage::record_claude(&ctx.store, &agent_kp, &session_id, path, model.as_deref()) {
+                        eprintln!("axel: usage: {e}");
+                    }
+        }
+        HarnessArg::Codex => {
+            if let Some(tid) = event.get("thread-id").and_then(|t| t.as_str())
+                && let Err(e) = usage::record_codex(&ctx.store, &agent_kp, &session_id, tid, model.as_deref()) {
+                    eprintln!("axel: usage: {e}");
+                }
+        }
+    }
+
+    let Some(m) = mapped else { return Ok(()) };
+
+    let app = match harness {
+        HarnessArg::Claude => "claude-code",
+        HarnessArg::Codex => "codex",
+    };
+    let title = ctx.store.get_thread(&thread_id)?.map(|t| t.title);
+    let _ = osc::emit_to_tty(&osc::Report {
+        state: m.osc_state,
+        id: None,
+        kind: m.kind,
+        progress: None,
+        app: Some(app),
+        title: title.as_deref(),
+        msg: Some(&m.msg),
+    });
+
+    ctx.store.record_status(
+        &agent_kp,
+        &session_id,
+        &StatusReport {
+            state: convert::status_state(m.osc_state),
+            kind: m.kind.map(convert::blocked_kind),
+            title: title.clone(),
+            msg: Some(m.msg.clone()),
+            progress: None,
+        },
+    )?;
+    if let Some(state) = m.session_state {
+        if state == SessionState::Ended {
+            ctx.store.end_session(&agent_kp, &session_id, Some("harness exited"))?;
+        } else {
+            ctx.store.update_session(&agent_kp, &session_id, &SessionUpdate { state: Some(state), ..Default::default() })?;
+        }
+    }
+
+    if let Some(req_kind) = m.request {
+        let owner_pk = ctx.owner()?.public().to_string();
+        let env = EnvelopeBuilder::new(req_kind, m.msg.clone())
+            .thread(&thread_id)
+            .session(&session_id)
+            .mention(&owner_pk)
+            .tag(vec!["k".into(), m.kind.unwrap_or(osc::Kind::Question).as_str().into()])
+            .sign(&agent_kp)?;
+        let request_id = env.id.clone();
+        ctx.store.post(&env)?;
+
+        if m.can_decide {
+            let wait = launch::hook_wait_secs();
+            if wait > 0
+                && let Some(decision) = wait_for_reply(&ctx, &request_id, Duration::from_secs(wait))? {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "hookSpecificOutput": {
+                                "hookEventName": "PermissionRequest",
+                                "decision": { "behavior": decision }
+                            }
+                        })
+                    );
+                }
+        }
+    }
+    Ok(())
+}
+
+struct Mapped {
+    osc_state: osc::State,
+    kind: Option<osc::Kind>,
+    msg: String,
+    session_state: Option<SessionState>,
+    /// Post a message of this kind into the owner's inbox.
+    request: Option<u32>,
+    /// A hook response can allow/deny (Claude `PermissionRequest`).
+    can_decide: bool,
+}
+
+fn working(msg: String) -> Mapped {
+    Mapped { osc_state: osc::State::Working, kind: None, msg, session_state: Some(SessionState::Running), request: None, can_decide: false }
+}
+
+fn map_claude(e: &Value) -> Option<Mapped> {
+    let name = e.get("hook_event_name")?.as_str()?;
+    let tool = e.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+    let short_input = e.get("tool_input").map(summarize_tool_input).unwrap_or_default();
+    Some(match name {
+        "SessionStart" => working("session started".into()),
+        "UserPromptSubmit" => working("thinking".into()),
+        "PreToolUse" if tool == "AskUserQuestion" => {
+            let q = e.get("tool_input").map(summarize_question).unwrap_or_else(|| "design question".into());
+            Mapped { osc_state: osc::State::Blocked, kind: Some(osc::Kind::Question), msg: q, session_state: Some(SessionState::Blocked), request: Some(kind::QUESTION), can_decide: false }
+        }
+        "PreToolUse" => working(format!("{tool} {short_input}").trim().into()),
+        "PostToolUse" if tool == "AskUserQuestion" => working("answered".into()),
+        "PostToolUse" => Mapped { session_state: None, ..working(format!("{tool} done")) },
+        "PermissionRequest" => Mapped {
+            osc_state: osc::State::Blocked,
+            kind: Some(osc::Kind::Permission),
+            msg: format!("permission: {tool} {short_input}").trim().into(),
+            session_state: Some(SessionState::Blocked),
+            request: Some(kind::PERMISSION_REQUEST),
+            can_decide: true,
+        },
+        "Notification" => {
+            let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("needs attention").to_string();
+            let ntype = e.get("notification_type").and_then(|t| t.as_str()).unwrap_or("");
+            let is_perm = ntype == "permission_prompt" || msg.to_ascii_lowercase().contains("permission");
+            Mapped {
+                osc_state: osc::State::Blocked,
+                kind: Some(if is_perm { osc::Kind::Permission } else { osc::Kind::Question }),
+                msg,
+                session_state: Some(SessionState::Blocked),
+                // PermissionRequest already posted the permission; only post other notifications.
+                request: if is_perm { None } else { Some(kind::QUESTION) },
+                can_decide: false,
+            }
+        }
+        "Stop" => Mapped { osc_state: osc::State::Done, kind: None, msg: "turn finished".into(), session_state: Some(SessionState::Idle), request: None, can_decide: false },
+        "SubagentStop" => Mapped { session_state: None, ..working("subagent finished".into()) },
+        "SessionEnd" => Mapped { osc_state: osc::State::Clear, kind: None, msg: "session ended".into(), session_state: Some(SessionState::Ended), request: None, can_decide: false },
+        _ => return None,
+    })
+}
+
+fn map_codex(e: &Value) -> Option<Mapped> {
+    let t = e.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    Some(match t {
+        "agent-turn-complete" => {
+            let msg: String = e
+                .get("last-assistant-message")
+                .and_then(|m| m.as_str())
+                .map(|s| s.lines().next().unwrap_or("").chars().take(120).collect())
+                .unwrap_or_else(|| "turn finished".into());
+            // Codex has no AskUserQuestion; a turn that ends with a question mark is one.
+            let asks = msg.trim_end().ends_with('?');
+            Mapped {
+                osc_state: if asks { osc::State::Blocked } else { osc::State::Done },
+                kind: if asks { Some(osc::Kind::Question) } else { None },
+                msg,
+                session_state: Some(if asks { SessionState::Blocked } else { SessionState::Idle }),
+                request: if asks { Some(kind::QUESTION) } else { None },
+                can_decide: false,
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// The autopilot guard for pane sessions (hook-mediated). The rules live in
+/// `axel_acp::policy` so managed sessions apply the same ones.
+pub mod guard {
+    use serde_json::Value;
+
+    pub fn deny_reason(event: &Value, disallowed_tools: &[String]) -> Option<String> {
+        let tool = event.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+        if disallowed_tools.iter().any(|d| d == tool) {
+            return Some(format!("tool {tool} is disallowed for this agent"));
+        }
+        if tool != "Bash" {
+            return None;
+        }
+        let cmd = event.pointer("/tool_input/command").and_then(|c| c.as_str()).unwrap_or("");
+        axel_acp::policy::shell_deny_reason(cmd)
+    }
+}
+
+fn disallowed_tools() -> Vec<String> {
+    std::env::var("AXEL_DISALLOWED_TOOLS")
+        .ok()
+        .map(|s| s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+fn agent_key(ctx: &Ctx, agent_pk: &str) -> Result<Option<axel_identity::Keypair>> {
+    if agent_pk.is_empty() {
+        return Ok(None);
+    }
+    Ok(ctx.keystore.agent(&agent_pk.parse()?)?)
+}
+
+fn post_note(ctx: &Ctx, thread_id: &str, session_id: &str, kp: &axel_identity::Keypair, text: &str) -> Result<()> {
+    let owner_pk = ctx.owner()?.public().to_string();
+    let env = EnvelopeBuilder::new(kind::NOTE, text).thread(thread_id).session(session_id).mention(&owner_pk).sign(kp)?;
+    ctx.store.post(&env)?;
+    Ok(())
+}
+
+fn wait_for_reply(ctx: &Ctx, request_id: &str, timeout: Duration) -> Result<Option<&'static str>> {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        for m in ctx.store.replies_to(request_id)? {
+            if m.kind == kind::PERMISSION_REPLY {
+                return Ok(Some(if m.content.trim() == "allow" { "allow" } else { "deny" }));
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    Ok(None)
+}
+
+fn summarize_tool_input(v: &Value) -> String {
+    for key in ["command", "file_path", "pattern", "url", "description"] {
+        if let Some(s) = v.get(key).and_then(|s| s.as_str()) {
+            let one = s.lines().next().unwrap_or("");
+            return one.chars().take(80).collect();
+        }
+    }
+    String::new()
+}
+
+/// `AskUserQuestion` input: `{questions:[{question, options:[{label,..}]}]}`.
+fn summarize_question(v: &Value) -> String {
+    let Some(qs) = v.get("questions").and_then(|q| q.as_array()) else { return "design question".into() };
+    let mut out = Vec::new();
+    for q in qs {
+        let text = q.get("question").and_then(|t| t.as_str()).unwrap_or("?");
+        let opts: Vec<&str> = q
+            .get("options")
+            .and_then(|o| o.as_array())
+            .map(|o| o.iter().filter_map(|x| x.get("label").and_then(|l| l.as_str())).collect())
+            .unwrap_or_default();
+        if opts.is_empty() { out.push(text.to_string()) } else { out.push(format!("{text} [{}]", opts.join(" / "))) }
+    }
+    out.join(" | ")
+}

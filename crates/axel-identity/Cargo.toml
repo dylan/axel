@@ -1,0 +1,21 @@
+[package]
+name = "axel-identity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ed25519 identities, owner attestation and keystore for Axel agents"
+
+[dependencies]
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+sha2.workspace = true
+bs58.workspace = true
+zeroize.workspace = true
+keyring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "axel-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP server for Axel — agent and thread management tools"
+
+[dependencies]
+axel-identity.workspace = true
+axel-store.workspace = true
+axel-config.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

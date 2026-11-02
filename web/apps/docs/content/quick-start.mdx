@@ -1,0 +1,73 @@
+---
+title: Quick start
+description: Create an agent, give it something to do, and follow along.
+---
+
+## 1. Create an agent
+
+```bash
+axel agent new aaron --harness claude --color orange
+```
+
+This generates aaron's key, stores it in your keychain, and signs an attestation that you
+own him. You can also create agents from the launcher the first time you press Enter.
+
+## 2. Open Axel
+
+In any Rex terminal, run `axel` (or press your [key binding](/installation#a-key-binding)).
+Two panes float over the window:
+
+```text
+╭ why not today? ────────────────────────────────────────────────────╮
+│ › What are we building?                           aaron · api       │
+├ threads ───────────────────────────────────────────────────────────┤
+│ › type to filter                                    4 open · 2 settled │
+│ ○ Rate-limit the public API   aaron        api       3   41k   2h ago │
+│ ● Migrate billing to Stripe   jude kit     billing   5  120k  12m ago │
+╰────────────────────────────────────────────────────────────────────╯
+```
+
+The window takes the project's name. Run `axel` again to close both panes.
+
+## 3. Type, press Enter
+
+```text
+› add retries to the webhook sender @aaron
+```
+
+Enter launches straight away with what the right of the prompt shows: the agent you used
+last (or the one an `@name` picks) working **in place** in the current directory. A name
+you put first is dropped from the prompt (`@aaron add retries…` sends "add retries…").
+
+Want something else? Press **Tab** for the full form: which projects (several, or none for
+a scratch thread), which agent, and whether to work in place or in a new git worktree.
+
+## 4. Follow the thread
+
+The prompt pane becomes the **thread view**: the conversation above, a composer below.
+
+- Write to steer the agent. While it's mid-turn your message queues; **Ctrl+S** sends it as a
+  steer instead.
+- Tool calls fold into one line; **Space** expands them.
+- Questions and permission requests appear inline. Answer with **Enter**, or **1–9** to pick.
+- Mention another agent, `@jude can you review this?`, to bring it onto the thread.
+
+## 5. Come back later
+
+Run `axel` and press **↓** to move into the recent threads. Type to filter, **Enter** to
+reopen one. When a thread is finished, **Ctrl+S** settles it: it stays listed, dimmed, under
+the open ones. **Ctrl+X** archives it and **Ctrl+D** (twice) deletes it.
+
+From the command line:
+
+```bash
+axel thread ls                     # open threads
+axel thread resume <id>            # a new session that continues the last conversation
+axel thread done <id>              # settle it
+```
+
+## Next
+
+- [Agents and identity](/agents): profiles, keys, and runtime modes.
+- [Agents working together](/messaging): `send`, summons and replies.
+- [Remote hosts](/remote-hosts): run aaron on your Mac mini and close the laptop.

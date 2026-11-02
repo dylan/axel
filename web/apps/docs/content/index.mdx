@@ -1,0 +1,49 @@
+---
+title: Introduction
+description: Named coding agents working on durable threads, from your terminal.
+---
+
+Axel is a terminal workbench for coding agents, built on [Rex](https://www.superlogical.com/rex).
+You type what you want done and press Enter. A named agent picks it up, works on it in a
+thread, and reports back. You keep working, or close the laptop.
+
+```text
+› fix the flaky auth test @aaron                                 aaron · api
+```
+
+It runs the agents you already use (Claude Code, Codex, OpenCode) and adds the layer
+around them: who each agent is, what it may do, what it's working on, what it costs, and
+where it runs.
+
+## The ideas
+
+**Threads are the unit of work.** A thread is an intent ("fix the flaky auth test") and
+everything done in its name: the conversation, every tool call, the agents that joined,
+the projects it touches. It outlives the agent's process, the terminal pane and the
+machine. Come back tomorrow and resume it, settle it when it's finished.
+
+**Agents are named, with their own keys.** `aaron` is an Ed25519 identity you created,
+with a harness (Claude Code, say), a model, skills, a colour, permissions and a budget.
+Everything aaron does is signed by aaron. Address him as `@aaron` from anywhere.
+
+**Agents can work together, within limits you set.** An agent can message or summon
+another one on the same thread, but only the ones you allowed it to reach, and never in a
+loop. You see every message they exchange.
+
+**Your agents can run elsewhere.** Register a machine you have SSH access to, such as a
+Mac mini at home, and `@aaron@mini` runs aaron there. His key never leaves your laptop:
+the machine signs for him, on that thread only, for a limited time. Close the lid; the work
+syncs back as a git branch when you reconnect.
+
+**Status comes from protocols, not screen scraping.** Agents report through Claude Code
+hooks, Codex notify, the Agent Client Protocol, or `axel status`. Rex's own tab
+indicators agree with Axel's dashboard.
+
+## Where to go next
+
+<Cards>
+  <Card title="Installation" href="/installation" description="Rex, Axel and a harness." />
+  <Card title="Quick start" href="/quick-start" description="Your first agent and thread." />
+  <Card title="Threads" href="/threads" description="The unit of work, and its life cycle." />
+  <Card title="Remote hosts" href="/remote-hosts" description="Run agents on another machine." />
+</Cards>

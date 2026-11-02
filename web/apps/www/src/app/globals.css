@@ -1,0 +1,61 @@
+@import 'tailwindcss';
+
+/*
+ * Colours from Axel the axolotl: sun yellow, tangerine, hot pink, violet and
+ * electric blue, glowing on a deep violet-black.
+ */
+@theme {
+  --color-ink: #09080d;
+  --color-surface: #121019;
+  --color-raised: #1b1825;
+  --color-line: #2b2638;
+  --color-fg: #f6f3f8;
+  --color-muted: #aaa4b6;
+  --color-dim: #6f697c;
+  --color-sun: #fed704;
+  --color-tangerine: #fe711f;
+  --color-pink: #f745c6;
+  --color-violet: #a64dff;
+  --color-sky: #2293fd;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+body {
+  background: var(--color-ink);
+  color: var(--color-fg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* The axolotl's spectrum, head to tail. */
+.bg-spectrum {
+  background: linear-gradient(120deg, #fed704 0%, #fe711f 28%, #f745c6 55%, #a64dff 78%, #2293fd 100%);
+}
+
+.text-spectrum {
+  background: linear-gradient(100deg, #fed704 0%, #fe711f 30%, #f745c6 60%, #a64dff 85%, #2293fd 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Neon glow for small accents. */
+.glow-pink {
+  text-shadow: 0 0 24px rgba(247, 69, 198, 0.55);
+}
+
+pre::-webkit-scrollbar {
+  height: 6px;
+}
+pre::-webkit-scrollbar-track {
+  background: var(--color-surface);
+}
+pre::-webkit-scrollbar-thumb {
+  background: var(--color-line);
+  border-radius: 3px;
+}
+
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}

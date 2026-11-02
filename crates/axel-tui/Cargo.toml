@@ -1,0 +1,18 @@
+[package]
+name = "axel-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ratatui launcher and inbox for Axel"
+
+[dependencies]
+axel-store.workspace = true
+axel-identity.workspace = true
+axel-inbox.workspace = true
+axel-config.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+serde_json.workspace = true

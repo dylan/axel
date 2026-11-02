@@ -1,0 +1,57 @@
+---
+title: Installation
+description: Rex, Axel, and the harness your agents run.
+---
+
+## Requirements
+
+- **macOS** (Linux works for the CLI; the floating panes need Rex).
+- **[Rex](https://www.superlogical.com/rex)**, the terminal Axel lives in. Outside Rex, Axel
+  runs the same interface inline in your terminal.
+- **A harness**: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex) or
+  [OpenCode](https://opencode.ai), installed and logged in.
+- **Rust** and [`just`](https://github.com/casey/just), to build Axel from source.
+
+## Build Axel
+
+```bash
+git clone https://github.com/lgalabru/axel && cd axel
+just install    # release build, linked into ~/.local/bin and ~/.cargo/bin
+axel doctor     # checks Rex, the keychain and the database
+```
+
+The first run creates your **owner key** (an Ed25519 key kept in the macOS keychain) and
+the local database at `~/.axel/axel.db`.
+
+## Managed sessions (recommended)
+
+Axel drives agents best over the [Agent Client Protocol](https://agentclientprotocol.com):
+you then work in Axel's own thread view, and permissions are decided by your policies
+rather than by a dialog in some pane. Install the adapter for your harness:
+
+```bash
+npm i -g @zed-industries/claude-code-acp   # Claude Code
+# codex-acp for Codex, `goose acp` for Goose
+```
+
+Without an adapter, an agent runs as its normal CLI in a Rex pane, and reports its status
+through hooks that Axel installs at launch.
+
+## A key binding
+
+Bind Axel to a key in Rex: append
+[`docs/rex-init.lua`](https://github.com/lgalabru/axel/blob/main/docs/rex-init.lua) to
+`~/.config/rex/init.lua`, then run `rex config reload`.
+
+## Claude Code's autopilot prompt
+
+Agents run on **autopilot** by default: Claude Code starts with bypass permissions, and
+Axel's guard hook still refuses irreversible shell commands. Claude Code asks you to accept
+that mode once per machine. Accept it the first time, or set it ahead of time in
+`~/.claude/settings.json`:
+
+```json
+{ "skipDangerousModePermissionPrompt": true }
+```
+
+See [Permissions and budgets](/policies) for the other modes.

@@ -1,0 +1,46 @@
+---
+title: The agent's toolkit
+description: What Axel gives every agent session, the axel skill and MCP tools.
+---
+
+Every session Axel starts knows who it is and how to work with others, whatever its harness.
+
+## The axel skill
+
+Installed into each session's skills directory. It teaches the agent:
+
+- who it is, from `AXEL_AGENT_NAME`, `AXEL_AGENT`, `AXEL_THREAD` and `AXEL_SESSION`;
+- how to message, summon and answer other agents, and what each outcome means;
+- how to behave on a remote host, where nobody can answer prompts;
+- what each refusal means and what to tell you.
+
+## MCP tools
+
+Each session gets an MCP server named `axel`. Agents prefer it to the CLI: structured
+arguments, no shell quoting, no permission prompt.
+
+| Tool | CLI equivalent |
+|---|---|
+| `send` `{to: ["jude"], text}` | `axel send "@jude …"` |
+| `set_status` `{state, message, kind}` | `axel status STATE "MSG" --kind KIND` |
+| `read_inbox` `{limit}` | `axel inbox --agent "$AXEL_AGENT_NAME"` |
+| `list_agents`, `get_agent` | `axel agent ls`, `axel agent show NAME` |
+
+Agents can't change policies or create agents: `axel agent edit`, `axel agent new` and
+`create_agent` refuse them.
+
+You can run the same server for any MCP client with `axel mcp`.
+
+## Status
+
+Managed sessions report working and idle by themselves. For the rest, agents (or your own
+scripts) report one line you see on the dashboard:
+
+```bash
+axel status working "migrating the auth tests"
+axel status blocked --kind question "which DB should staging use?"
+axel status done "PR ready: auth refresh fix"
+```
+
+Status from every harness flows the same way, through Claude Code hooks, Codex notify, ACP,
+or `axel status`, and is mirrored to Rex, so Rex's tab indicators agree with Axel.

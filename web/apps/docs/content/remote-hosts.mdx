@@ -1,0 +1,92 @@
+---
+title: Remote hosts
+description: Run agents on another machine, close the laptop, find the work when you're back.
+---
+
+A **host** is another machine that runs agents for you: a Mac mini at home, a build box, a
+cloud VM. Ask aaron to do something on the mini, close your laptop, take the subway. The
+work keeps going, and syncs back when you reconnect.
+
+## Add a host
+
+Any machine you can reach over SSH works. [Tailscale](https://tailscale.com) makes that
+easy from anywhere.
+
+```bash
+axel host add mini     # `mini` is an SSH host alias
+axel host ls
+```
+
+This copies Axel over, installs what's missing (Node, Claude Code, the ACP adapter) and
+records the machine with its host key. Log in to Claude Code once on the host, from a pane
+of its own Rex, because the keychain isn't reachable over SSH:
+
+```bash
+rex -S mini run -- claude    # then /login
+```
+
+For a host that should survive reboots and power cuts unattended, have it log in
+automatically, keep the Rex server running at login, and disable key expiry for it in your
+Tailscale admin console.
+
+## Ask an agent to run there
+
+```text
+› profile the import job and make it faster @aaron@mini
+```
+
+Or make it aaron's default, so a plain `@aaron` runs him there:
+
+```bash
+axel agent edit aaron --host mini       # `--host local` brings him home
+```
+
+`@aaron@local` runs him on your laptop for one thread. From the command line:
+`axel thread new … --host mini`, `axel thread spawn … --host mini`.
+
+## What happens
+
+1. **The thread** is shared with the host.
+2. **The code** goes as a snapshot of your working tree (tracked and untracked files, not
+   ignored ones), pushed over SSH into a repository on the host. Your index and branches
+   aren't touched.
+3. **The agent** starts in a worktree on its own branch, in a managed session on the
+   host's Rex, on autopilot: nobody is there to answer prompts, and the guard hook still
+   runs. Its [permissions and budget](/policies) and the agents it may reach go with it.
+   Rex on the host notifies you when a turn ends or something needs you.
+4. **Your laptop follows along** while the host has live sessions: the thread view streams
+   as if the agent ran locally. It backs off while the laptop sleeps and catches up after.
+
+Prompts, steering, approvals and messages you send to that session are relayed to the
+host. When you're back, its branch (and any uncommitted work) is fetched home.
+
+Agents on the host can [message agents on your laptop](/messaging): those messages are
+delivered when your laptop syncs, under the sender's permissions.
+
+## Keys never leave home
+
+aaron's private key stays in your laptop's keychain. For each job, the host makes a fresh
+**job key**, and aaron signs a **delegation** to it: "this key may sign as me, on this
+thread only, for the next 7 days". Every copy of the thread verifies that delegation
+before it trusts anything the host signed.
+
+A delegation can't create threads, can't touch other threads, and expires on its own.
+`axel host rm mini` stops new jobs.
+
+## Moving a running session
+
+```bash
+axel session move <session> --to mini     # and later: --to local
+```
+
+The session stops, and its code (uncommitted changes too) and its Claude Code conversation
+move with it. A new session on the same thread picks up the conversation where it stopped.
+Coming home, the work lands in a worktree on the agent's branch, with the host's uncommitted
+changes still uncommitted. Claude Code sessions only, for now.
+
+## Not yet
+
+- Moving a session straight from one host to another: bring it home first.
+- Moving Codex sessions.
+- Agents on two different hosts messaging each other directly: it works, through your
+  laptop's sync.
