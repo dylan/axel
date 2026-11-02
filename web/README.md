@@ -16,9 +16,7 @@ URLs live in `apps/www/src/lib/site.ts`.
 
 ## README banner
 
-`docs/assets/axel-banner-{dark,light}.png` (2560x800) are rendered from HTML with headless Chrome at 2x, with `web/assets/axel-mascot.png`. Shown at `width="100
-## README banner
-
-`docs/assets/axel-banner-dark.png` and `-light.png` (2560x800) are rendered from HTML with
-headless Chrome at 2x, around `web/assets/axel-mascot.png`. The README shows them at
-`width="100%"`, so keep them wide and short.
+`docs/assets/axel-banner-dark.png` and `-light.png` (2560x800, transparent) are the mascot
+(`web/assets/axel-mascot.png`) with the Product Hunt badges under it, rendered from HTML with
+headless Chrome at 2x. The badges are drawn, not Product Hunt's live widgets, so the vote
+count (280) is fixed. The README shows them at `width="100%"`, so keep them wide and short.

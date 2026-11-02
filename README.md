@@ -1,7 +1,7 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/axel-banner-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/assets/axel-banner-light.png">
-  <img alt="axel: named agents, durable threads, your terminal" src="docs/assets/axel-banner-dark.png" width="100%">
+  <img alt="Axel the axolotl. Featured on Product Hunt, #3 Product of the Day" src="docs/assets/axel-banner-dark.png" width="100%">
 </picture>
 
 # Axel
