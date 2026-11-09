@@ -374,6 +374,20 @@ mod tests {
     }
 
     #[test]
+    fn tab_explains_when_a_split_composer_has_nothing_to_browse() {
+        let mut v = ThreadView::new("T1", fixtures::data());
+        v.compose_only = true;
+        v.handle_compose_key(key(KeyCode::Tab));
+        assert_eq!(v.focus, crate::thread::Focus::Composer);
+        assert!(v.status.as_deref().is_some_and(|s| s.contains("nothing to browse")));
+        v.handle_compose_key(key(KeyCode::Char(' ')));
+        assert_eq!(v.composer.text(), " ", "space edits the draft; no timeline cursor lives here");
+        v.attachments.push(std::path::PathBuf::from("test.txt"));
+        v.handle_compose_key(key(KeyCode::Tab));
+        assert_eq!(v.focus, crate::thread::Focus::Attachments);
+    }
+
+    #[test]
     fn pending_approval_cards_use_the_terminals_background() {
         let v = ThreadView::new("T1", fixtures::data());
         let lines = row_lines(&v, &Row::Choice(v.pending_choice().unwrap()), 80, true);
