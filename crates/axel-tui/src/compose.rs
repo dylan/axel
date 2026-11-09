@@ -374,6 +374,16 @@ mod tests {
     }
 
     #[test]
+    fn pending_approval_cards_use_the_terminals_background() {
+        let v = ThreadView::new("T1", fixtures::data());
+        let lines = row_lines(&v, &Row::Choice(v.pending_choice().unwrap()), 80, true);
+        assert!(!lines.is_empty());
+        for span in lines.iter().flat_map(|line| &line.spans) {
+            assert!(span.style.bg.is_none_or(|c| c == ratatui::style::Color::Reset));
+        }
+    }
+
+    #[test]
     fn arrows_move_through_a_draft_taller_than_the_composer_and_return_to_the_end() {
         let mut v = ThreadView::new("T1", fixtures::data());
         v.compose_only = true;

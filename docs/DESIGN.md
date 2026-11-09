@@ -612,6 +612,10 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
 - **Composer panels**: Ctrl+D opens the thread controls. Ctrl+T opens a focused
   floating shell in the thread’s project directory, using its worktree when present.
   A thread without a local project uses the composer’s directory.
+- **Terminal colours**: normal text and surfaces use the terminal's own foreground
+  and background. Selections reverse those colours, and code explicitly resets
+  its background and uses the terminal's blue. Approval cards do not force a dark
+  surface. The same rendering works with light and dark Rex themes.
 - **Composer arrows**: Up and Down move through the wrapped rows on screen,
   keeping the intended column across shorter lines. This also applies to recalled
   prompts. History changes only beyond the first or last screen row.
