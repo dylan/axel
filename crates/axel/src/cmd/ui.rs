@@ -558,26 +558,41 @@ fn stream_with_input(ctx: &Ctx, thread_id: &str) -> Result<()> {
                 return Ok(());
             }
         };
-        let view = rex.view()?;
-        let composer = composer_below(&view, &rex.env().block).context(t!("no composer below this message pane"))?;
-        // Paste into the owner's composer, never into an agent's terminal.
-        // In particular, a digit must not answer a pending approval.
-        rex.api_call("block.event", serde_json::json!({
-            "block_id": composer, "event": { "type": "paste", "payload": { "text": text } }
-        }))?;
-        rex.api_call("session.focus_block", serde_json::json!({ "block_id": composer }))?;
+        // A changing layout can take the composer away while input is in flight.
+        // Failing to forward a key should not close the conversation pane.
+        if let Err(error) = forward_to_composer(rex, &text) {
+            eprintln!("axel: {error:#}");
+        }
         Ok(())
     };
     let redirect: Option<&axel_tui::RedirectInputFn<'_>> = ctx.rex.as_ref().map(|_| &redirect as _);
     axel_tui::run_stream(&ctx.store, &owner_pk, thread_id, redirect)
 }
 
-/// Resolve by layout, rather than picking another thread's composer by label.
+fn forward_to_composer(rex: &axel_rex::Rex, text: &str) -> Result<()> {
+    let view = rex.view()?;
+    let composer = composer_below(&view, &rex.env().block).context(t!("no composer below this message pane"))?;
+    // Paste into the owner's composer so a digit can't answer a pending approval.
+    rex.api_call("block.event", serde_json::json!({
+        "block_id": composer, "event": { "type": "paste", "payload": { "text": text } }
+    }))?;
+    rex.api_call("session.focus_block", serde_json::json!({ "block_id": composer }))?;
+    Ok(())
+}
+
+/// Resolve the composer in the stream's own layer, whether tiled or floating.
 fn composer_below(view: &serde_json::Value, stream: &str) -> Option<String> {
-    let blocks = tiled_layer_of(view, stream)?.get("blocks")?.as_array()?;
+    let layer = view.get("windows")?.as_array()?.iter()
+        .filter_map(|window| window.get("layers")?.as_array())
+        .flatten()
+        .find(|layer| layer.get("blocks").and_then(|b| b.as_array()).is_some_and(|blocks| {
+            blocks.iter().any(|b| b.get("block_id").and_then(|id| id.as_str()) == Some(stream))
+        }))?;
+    let layout = layer.get("layout")?;
+    let blocks = layer.get("blocks")?.as_array()?;
     blocks.iter().find_map(|block| {
         let id = block.get("block_id")?.as_str()?;
-        (block.get("label")?.as_str()? == COMPOSE_LABEL && block_above(view, id).as_deref() == Some(stream)).then(|| id.to_string())
+        (block.get("label")?.as_str()? == COMPOSE_LABEL && block_above_in(layout, id).as_deref() == Some(stream)).then(|| id.to_string())
     })
 }
 
@@ -733,6 +748,10 @@ fn tiled_root(view: &serde_json::Value, block: &str) -> Option<String> {
 /// The block above `block` in a top/bottom split: the stream a composer serves.
 fn block_above(view: &serde_json::Value, block: &str) -> Option<String> {
     let layout = tiled_layer_of(view, block)?.get("layout")?;
+    block_above_in(layout, block)
+}
+
+fn block_above_in(layout: &serde_json::Value, block: &str) -> Option<String> {
     find_split(layout, &|_, after| after == block).map(|(before, _)| before).or_else(|| above_row(layout, block))
 }
 
@@ -1602,6 +1621,29 @@ mod dock_tests {
         }]}]});
         assert_eq!(composer_below(&row, "S").as_deref(), Some("C"));
         assert_eq!(composer_below(&row, "U"), None);
+    }
+
+    #[test]
+    fn a_floating_stream_routes_input_to_its_own_composer() {
+        let mut view = view();
+        view["windows"][1]["layers"].as_array_mut().unwrap().push(json!({
+            "kind": "floating",
+            "blocks": [
+                {"block_id": "float-stream", "label": "Floating thread"},
+                {"block_id": "float-compose", "label": "compose"},
+                {"block_id": "float-tokens", "label": "tokens"}
+            ],
+            "layout": {"split": {
+                "direction": "vertical", "before": {"block_id": "float-stream"},
+                "after": {"split": {
+                    "direction": "horizontal",
+                    "before": {"block_id": "float-compose"}, "after": {"block_id": "float-tokens"}
+                }}
+            }}
+        }));
+        assert_eq!(composer_below(&view, "float-stream").as_deref(), Some("float-compose"));
+        assert_eq!(composer_below(&view, "block:stream").as_deref(), Some("block:compose"));
+        assert_eq!(composer_below(&view, "block:launcher"), None);
     }
 }
 
