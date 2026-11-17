@@ -592,17 +592,18 @@ impl Store {
         )?)
     }
 
-    /// What each agent spent, most recent spender first.
-    pub fn usage_by_agent(&self, now: i64) -> Result<Vec<UsageWindows>, Error> {
-        self.usage_windows(UsageGrouping::Agent, now, None)
+    /// What each agent spent, most recent spender first: on `thread` alone,
+    /// or (`None`) everywhere.
+    pub fn usage_by_agent(&self, now: i64, thread: Option<&str>) -> Result<Vec<UsageWindows>, Error> {
+        self.usage_windows(UsageGrouping::Agent, now, None, thread)
     }
 
     /// What each thread spent, most recent first, at most `limit` of them.
     pub fn usage_by_thread(&self, now: i64, limit: usize) -> Result<Vec<UsageWindows>, Error> {
-        self.usage_windows(UsageGrouping::Thread, now, Some(limit))
+        self.usage_windows(UsageGrouping::Thread, now, Some(limit), None)
     }
 
-    fn usage_windows(&self, grouping: UsageGrouping, now: i64, limit: Option<usize>) -> Result<Vec<UsageWindows>, Error> {
+    fn usage_windows(&self, grouping: UsageGrouping, now: i64, limit: Option<usize>, thread: Option<&str>) -> Result<Vec<UsageWindows>, Error> {
         let key = grouping.column();
         // One pass: each window is a sum over the rows inside it.
         let sums = |w: &str| {
@@ -613,14 +614,15 @@ impl Store {
                 .join(", ")
         };
         let sql = format!(
-            "SELECT {key}, {}, {}, {}, MAX(at) FROM effective_usage_log GROUP BY {key} ORDER BY MAX(at) DESC, {key} LIMIT ?3",
+            "SELECT {key}, {}, {}, {}, MAX(at) FROM effective_usage_log WHERE ?4 IS NULL OR thread_id = ?4
+             GROUP BY {key} ORDER BY MAX(at) DESC, {key} LIMIT ?3",
             sums("at >= ?1"),
             sums("at >= ?2"),
             sums("1"),
         );
         let mut st = self.conn.prepare(&sql)?;
         let limit = limit.map(sql_limit).unwrap_or(-1);
-        let rows = st.query_map(params![now - SECONDS_PER_HOUR, now - SECONDS_PER_DAY, limit], |r| {
+        let rows = st.query_map(params![now - SECONDS_PER_HOUR, now - SECONDS_PER_DAY, limit, thread], |r| {
             let totals = |at: usize| -> rusqlite::Result<UsageTotals> {
                 Ok(UsageTotals {
                     input_tokens: r.get(at)?,
@@ -638,16 +640,18 @@ impl Store {
     }
 
     /// Tokens spent in each of `buckets` slices of `bucket_secs` ending at
-    /// `now`, oldest first: a sparkline's worth.  `agent` `None` is everyone.
-    pub fn usage_series(&self, agent: Option<&str>, now: i64, bucket_secs: i64, buckets: usize) -> Result<Vec<i64>, Error> {
+    /// `now`, oldest first: a sparkline's worth.  `agent` `None` is everyone;
+    /// `thread` `None` is every thread.
+    pub fn usage_series(&self, agent: Option<&str>, thread: Option<&str>, now: i64, bucket_secs: i64, buckets: usize) -> Result<Vec<i64>, Error> {
         let bucket_secs = bucket_secs.max(1);
         let since = now.saturating_sub(bucket_secs.saturating_mul(sql_limit(buckets)));
         let mut out = vec![0i64; buckets];
         let mut statement = self.conn.prepare(
             "SELECT (at - ?1) / ?2, SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens)
-             FROM effective_usage_log WHERE at >= ?1 AND at < ?3 AND (?4 IS NULL OR agent_pubkey = ?4) GROUP BY 1",
+             FROM effective_usage_log WHERE at >= ?1 AND at < ?3 AND (?4 IS NULL OR agent_pubkey = ?4)
+               AND (?5 IS NULL OR thread_id = ?5) GROUP BY 1",
         )?;
-        let rows = statement.query_map(params![since, bucket_secs, now.saturating_add(1), agent], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        let rows = statement.query_map(params![since, bucket_secs, now.saturating_add(1), agent, thread], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
         for row in rows {
             let (bucket, tokens) = row?;
             // `at >= since` makes every bucket index non-negative; the last

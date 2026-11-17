@@ -21,7 +21,7 @@ pub enum Command {
         /// Screen to open on. Defaults to inbox when something needs you, else launcher.
         #[arg(long, value_enum)]
         screen: Option<ScreenArg>,
-        /// Thread to open (with --screen thread).
+        /// Thread to open (with --screen thread), or whose spend to show (with --screen usage).
         #[arg(long)]
         thread: Option<String>,
     },

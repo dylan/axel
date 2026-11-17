@@ -54,8 +54,9 @@ pub enum Screen {
     Thread(String),
     /// Recent threads: the pane under the launcher's prompt.
     Threads,
-    /// Tokens spent, per agent: the corner pane.
-    Usage,
+    /// Tokens spent, per agent: the corner pane. On one thread (the one
+    /// whose window it sits in), or every thread when `None`.
+    Usage(Option<String>),
 }
 
 /// A completed launcher form, ready for the CLI to turn into a thread.

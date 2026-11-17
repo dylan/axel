@@ -199,7 +199,7 @@ pub fn run_inline(screen: Option<ScreenArg>, thread: Option<String>) -> Result<(
     super::host::resume_followers(&ctx);
 
     let initial = resolve_initial(&ctx, screen, thread)?;
-    if initial == Screen::Usage { super::usage::start_reconciliation(); }
+    if matches!(initial, Screen::Usage(_)) { super::usage::start_reconciliation(); }
 
     let cwd = std::env::current_dir().context(t!("reading the current directory"))?;
     let send = |session_id: &str, cmd: SendCommand| -> Result<SendReply> { send_to_session(&ctx, session_id, cmd) };
@@ -275,6 +275,7 @@ fn resolve_initial(ctx: &Ctx, screen: Option<ScreenArg>, thread: Option<String>)
             Ok(Screen::Thread(id))
         }
         (Some(ScreenArg::Thread), None) => anyhow::bail!("{}", t!("--screen thread needs --thread ID")),
+        (Some(ScreenArg::Usage), Some(id)) => Ok(Screen::Usage(Some(resolve_thread_id(ctx, &id)?))),
         (other, _) => initial_screen(other),
     }
 }
@@ -409,7 +410,7 @@ fn initial_screen(screen: Option<ScreenArg>) -> Result<Screen> {
         Some(ScreenArg::Dashboard) => Screen::Dashboard,
         Some(ScreenArg::Thread) => Screen::Dashboard,
         Some(ScreenArg::Threads) => Screen::Threads,
-        Some(ScreenArg::Usage) => Screen::Usage,
+        Some(ScreenArg::Usage) => Screen::Usage(None),
         None => {
             let ctx = Ctx::open()?;
             let owner_pk = ctx.owner()?.public().to_string();
@@ -530,7 +531,7 @@ fn split_here(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
     let compose: Vec<String> = vec![exe, "thread".into(), "compose".into(), thread_id.to_string()];
     let mut env = passthrough_env();
     env.push(("AXEL_STREAM_BLOCK".into(), me.clone()));
-    let usage = usage_command();
+    let usage = usage_command(thread_id);
     let size = rex.terminal_size(&me).ok();
     let width = size.as_ref().map(|s| s.columns);
     let ids = rex.split_below_beside(&me, COMPOSE_LABEL, &compose, usage_beside(&usage, width).as_ref(), DOCK_STREAM, None, &env, true)?;
@@ -611,7 +612,7 @@ pub(super) fn dock_thread(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Re
     let title = axel_tui::util::ellipsize(&thread.title, 48);
     let cwd = std::env::current_dir().ok();
     let mut env = passthrough_env();
-    let usage = usage_command();
+    let usage = usage_command(&thread.id);
     let ids = if let Some(origin) = reusable_origin(rex, &me) {
         env.push((ORIGIN_BLOCK_ENV.into(), origin.clone()));
         // The shell leaves once the thread is in: the column takes its width.
@@ -792,7 +793,7 @@ fn open_split_tab(ctx: &Ctx, thread_id: &str) -> Result<()> {
     let stream: Vec<String> = vec![exe.clone(), "thread".into(), "stream".into(), thread.id.clone()];
     let compose: Vec<String> = vec![exe, "thread".into(), "compose".into(), thread.id.clone()];
     let label = axel_tui::util::ellipsize(&thread.title, 40);
-    let usage = usage_command();
+    let usage = usage_command(&thread.id);
     let width = window_columns(rex, &rex.env().block);
     let w = rex.new_window_stacked(&label, ("thread", &stream), (COMPOSE_LABEL, &compose), usage_beside(&usage, width).as_ref(), 0.8, None, &passthrough_env(), true)?;
     if let [stream, compose, rest @ ..] = &w.block_ids[..] {
@@ -951,10 +952,10 @@ pub fn run_compose(thread_id: &str) -> Result<()> {
     res
 }
 
-/// What the tokens pane beside a composer runs.
-fn usage_command() -> Vec<String> {
+/// What the tokens pane beside `thread_id`'s composer runs: that thread's spend.
+fn usage_command(thread_id: &str) -> Vec<String> {
     let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
-    vec![exe, "ui".into(), "--screen".into(), "usage".into()]
+    vec![exe, "ui".into(), "--screen".into(), "usage".into(), "--thread".into(), thread_id.to_string()]
 }
 
 /// The tokens pane for a composer row `columns` wide, if it has room:

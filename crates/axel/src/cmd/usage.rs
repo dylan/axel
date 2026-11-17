@@ -155,7 +155,7 @@ pub fn refresh() -> Result<()> {
     let n = native::Scanner::default().scan(&store, &claude, &codex)?;
     println!("{}", t!("Reconciled {n} sessions from local harness logs. Axel estimates, rolling 24h:", n = n));
     let now = chrono::Utc::now().timestamp();
-    for u in store.usage_by_agent(now)? {
+    for u in store.usage_by_agent(now, None)? {
         let name = store.agent_by_pubkey(&u.key)?.map(|a| a.name).unwrap_or(u.key);
         let cost = format!("{:.2}", u.last_day.cost_usd);
         println!("{}", t!("{name}: ${cost} · {tokens} tokens", name = name, cost = cost, tokens = u.last_day.tokens()));

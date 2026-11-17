@@ -819,14 +819,16 @@ fn session_live_state(s: &Session) -> axel_store::StatusState {
     }
 }
 
-/// Everything the usage pane shows.
-pub fn load_usage(store: &Store, now: i64) -> Result<crate::model::UsageData> {
+/// Everything the usage pane shows: what was spent on `thread`, or on every
+/// thread when `None`.
+pub fn load_usage(store: &Store, now: i64, thread: Option<&str>) -> Result<crate::model::UsageData> {
     use crate::model::{AgentSpend, ThreadSpend, UsageData};
     let agents: HashMap<String, axel_store::Agent> = store.list_agents().map_err(se)?.into_iter().map(|a| (a.pubkey.clone(), a)).collect();
     // The fullest live context of each agent.
     let mut context: HashMap<String, (i64, i64)> = HashMap::new();
     for c in store.session_contexts().map_err(se)? {
         let Some(s) = store.get_session(&c.session_id).map_err(se)? else { continue };
+        if thread.is_some_and(|t| t != s.thread_id) { continue }
         let fill = |u: i64, n: i64| u as f64 / n.max(1) as f64;
         let e = context.entry(s.agent_pubkey).or_insert((c.used, c.size));
         if fill(c.used, c.size) > fill(e.0, e.1) {
@@ -834,7 +836,7 @@ pub fn load_usage(store: &Store, now: i64) -> Result<crate::model::UsageData> {
         }
     }
     let mut data = UsageData::default();
-    for w in store.usage_by_agent(now).map_err(se)? {
+    for w in store.usage_by_agent(now, thread).map_err(se)? {
         let agent = agents.get(&w.key);
         add(&mut data.last_hour, &w.last_hour);
         add(&mut data.last_day, &w.last_day);
@@ -848,14 +850,16 @@ pub fn load_usage(store: &Store, now: i64) -> Result<crate::model::UsageData> {
             name: agent.map(|a| a.name.clone()).unwrap_or_else(|| w.key.chars().take(8).collect()),
             color: agent.and_then(|a| a.color),
             // A turn still running has spent without finishing a turn yet.
-            spark: if w.last_hour.tokens() > 0 { store.usage_series(Some(&w.key), now, 60, 60).map_err(se)? } else { vec![0; 60] },
+            spark: if w.last_hour.tokens() > 0 { store.usage_series(Some(&w.key), thread, now, 60, 60).map_err(se)? } else { vec![0; 60] },
             context: context.get(&w.key).copied(),
             last_hour: w.last_hour,
             last_day: w.last_day,
             total: w.total,
         });
     }
-    for w in store.usage_by_thread(now, 20).map_err(se)? {
+    // On one thread, a list of threads would only repeat it.
+    let threads = if thread.is_some() { Vec::new() } else { store.usage_by_thread(now, 20).map_err(se)? };
+    for w in threads {
         if w.last_day.tokens() == 0 && w.last_day.cost_usd == 0.0 { continue }
         let title = store.get_thread(&w.key).map_err(se)?.map(|t| t.title).unwrap_or_else(|| w.key.chars().take(8).collect());
         data.threads.push(ThreadSpend { title, last_day: w.last_day, total: w.total });
@@ -899,6 +903,33 @@ mod tests {
     }
 
     #[test]
+    fn the_usage_pane_on_a_thread_counts_only_that_thread() {
+        let store = Store::open_memory().unwrap();
+        let owner = axel_identity::Keypair::generate();
+        let pk = owner.public().to_string();
+        store.insert_agent(&NewAgent {pubkey:pk.clone(),name:"atlas".into(),harness:axel_store::Harness::Codex,model:None,effort:None,skills:vec![],prompt:None,color:None,runtime_mode:Default::default(),auth_tag:None}).unwrap();
+        let mut ids = Vec::new();
+        for (title, input) in [("a", 10), ("b", 300)] {
+            let thread=store.create_thread(&owner,title,"",None).unwrap();
+            let session=store.start_session(&owner,&axel_store::NewSession {thread_id:thread.id.clone(),agent_pubkey:pk.clone(),environment_id:"local".into(),environment_label:"local".into(),project_repo_key:None,harness:axel_store::Harness::Codex,runtime_mode:Default::default(),resumed_from:None,runtime:SessionRuntime::Managed}).unwrap();
+            store.add_usage(&owner,&session.id,&axel_store::UsageDelta {input_tokens:input,cost_usd_est:input as f64/100.0,..Default::default()},None).unwrap();
+            ids.push(thread.id);
+        }
+        // Store events can land a few seconds ahead of the clock; look a minute later.
+        let now=chrono::Utc::now().timestamp()+60;
+        let all=load_usage(&store,now,None).unwrap();
+        assert_eq!(all.last_day.input_tokens,310);
+        assert_eq!(all.threads.len(),2);
+        let b=load_usage(&store,now,Some(&ids[1])).unwrap();
+        assert_eq!(b.last_day.input_tokens,300,"thread a's spend stays out");
+        assert_eq!(b.last_day.cost_usd,3.0);
+        assert_eq!(b.agents.len(),1);
+        assert_eq!(b.agents[0].last_hour.input_tokens,300);
+        assert_eq!(b.agents[0].spark.iter().sum::<i64>(),300,"the chart counts only this thread");
+        assert!(b.threads.is_empty(),"no list of threads on one thread");
+    }
+
+    #[test]
     fn archived_usage_keeps_history_and_its_name_without_crowding_current_rows() {
         let store = Store::open_memory().unwrap();
         let owner = axel_identity::Keypair::generate();
@@ -909,10 +940,10 @@ mod tests {
         store.add_usage(&owner,&session.id,&axel_store::UsageDelta {input_tokens:1,cost_usd_est:1.0,..Default::default()},None).unwrap();
         store.archive_agent(&pk).unwrap();
         let now=chrono::Utc::now().timestamp();
-        let today=load_usage(&store,now).unwrap();
+        let today=load_usage(&store,now,None).unwrap();
         assert_eq!(today.agents[0].name,"atlas","recent spend retains the archived agent's name");
         assert_eq!(today.threads.len(),1,"an ongoing turn can spend before its first completion");
-        let old=load_usage(&store,store.usage(&session.id).unwrap().unwrap().updated_at+86_401).unwrap();
+        let old=load_usage(&store,store.usage(&session.id).unwrap().unwrap().updated_at+86_401,None).unwrap();
         assert!(old.agents.is_empty(),"no anonymous row for an inactive archived agent");
         assert_eq!(old.total.cost_usd,1.0,"history is still part of all-time totals");
     }

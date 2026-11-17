@@ -2464,7 +2464,7 @@ fn usage_is_kept_per_agent_over_the_last_hour_day_and_ever() {
     spend(&terra, &other.id, &st2.id, 3 * 86_400, 400, 4.0);
     spend(&opus, &t.id, &so.id, 60, 7, 0.5);
 
-    let by_agent = s.usage_by_agent(now).unwrap();
+    let by_agent = s.usage_by_agent(now, None).unwrap();
     assert_eq!(by_agent.len(), 2);
     assert_eq!(by_agent[0].key, pk(&opus), "the most recent spender first");
     let terra_u = by_agent.iter().find(|u| u.key == pk(&terra)).unwrap();
@@ -2490,17 +2490,28 @@ fn usage_is_kept_per_agent_over_the_last_hour_day_and_ever() {
 
     // An hour in four 15-minute slices: terra's 30-minute-old turn and opus's.
     assert_eq!(
-        s.usage_series(Some(&pk(&terra)), now, 900, 4).unwrap(),
+        s.usage_series(Some(&pk(&terra)), None, now, 900, 4).unwrap(),
         vec![0, 0, 111, 0]
     );
     assert_eq!(
-        s.usage_series(None, now, 900, 4).unwrap(),
+        s.usage_series(None, None, now, 900, 4).unwrap(),
         vec![0, 0, 111, 18]
     );
 
+    // One thread alone: terra's spend on the other thread stays out.
+    let on_t = s.usage_by_agent(now, Some(&t.id)).unwrap();
+    let terra_t = on_t.iter().find(|u| u.key == pk(&terra)).unwrap();
+    assert_eq!((terra_t.last_day.input_tokens, terra_t.total.input_tokens), (300, 300));
+    assert_eq!(on_t.len(), 2);
+    let on_other = s.usage_by_agent(now, Some(&other.id)).unwrap();
+    assert_eq!(on_other.len(), 1, "opus never spent on the other thread");
+    assert_eq!(on_other[0].total.input_tokens, 400);
+    assert_eq!(s.usage_series(None, Some(&t.id), now, 900, 4).unwrap(), vec![0, 0, 111, 18]);
+    assert_eq!(s.usage_series(None, Some(&other.id), now, 900, 4).unwrap(), vec![0; 4]);
+
     // The log is a projection: rebuilt, it holds the same.
     s.rebuild_projections().unwrap();
-    assert_eq!(s.usage_by_agent(now).unwrap(), by_agent);
+    assert_eq!(s.usage_by_agent(now, None).unwrap(), by_agent);
 }
 
 #[test]
@@ -2584,8 +2595,8 @@ fn native_usage_replaces_estimates_without_mutating_history_or_double_counting()
     assert_eq!(s.thread_usage(&t.id).unwrap().cost_usd_est,0.25);
     assert_eq!(s.agent_spend_since(&pk(&owner),now-50).unwrap(),0.0,"budget window uses call timestamps, not lifetime session cost");
     assert_eq!(s.agent_spend_since(&pk(&owner),now-200).unwrap(),0.25);
-    assert_eq!(s.usage_by_agent(now).unwrap()[0].last_day.cost_usd,0.25);
-    assert_eq!(s.usage_series(None,now,60,60).unwrap().iter().sum::<i64>(),210);
+    assert_eq!(s.usage_by_agent(now, None).unwrap()[0].last_day.cost_usd,0.25);
+    assert_eq!(s.usage_series(None,None,now,60,60).unwrap().iter().sum::<i64>(),210);
     assert_eq!(s.conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_,i64>(0)).unwrap(),raw+1);
     s.rebuild_projections().unwrap();
     assert_eq!(s.usage(&session.id).unwrap().unwrap().cost_usd_est,0.25,"native cache survives projection replay");

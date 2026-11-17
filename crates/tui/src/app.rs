@@ -203,7 +203,7 @@ impl<'a> App<'a> {
                 Ok(t) => self.picker.set_threads(t),
                 Err(e) => eprintln!("axel: refresh failed: {e}"),
             },
-            Screen::Usage => match glue::load_usage(self.deps.store, now) {
+            Screen::Usage(thread) => match glue::load_usage(self.deps.store, now, thread.as_deref()) {
                 Ok(u) => self.usage = u,
                 Err(e) => eprintln!("axel: refresh failed: {e}"),
             },
@@ -256,7 +256,7 @@ impl<'a> App<'a> {
             Screen::Launcher => view::launcher_view::render(frame, &self.launcher, now),
             Screen::Inbox => view::inbox_view::render(frame, &self.inbox, now),
             Screen::Threads => view::picker_view::render(frame, &self.picker, self.focused, now),
-            Screen::Usage => view::usage_view::render(frame, &self.usage, frame.area()),
+            Screen::Usage(_) => view::usage_view::render(frame, &self.usage, frame.area()),
             Screen::Thread(_) => {
                 if let Some(t) = &self.thread {
                     view::thread_view::render(frame, t, now);
@@ -315,7 +315,7 @@ impl<'a> App<'a> {
                 self.on_picker(action)
             }
             // Nothing to pick: Esc or q closes it.
-            Screen::Usage => matches!(key.code, KeyCode::Esc | KeyCode::Char('q')).then_some(Outcome::Quit),
+            Screen::Usage(_) => matches!(key.code, KeyCode::Esc | KeyCode::Char('q')).then_some(Outcome::Quit),
         }
     }
 
