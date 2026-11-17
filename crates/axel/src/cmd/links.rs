@@ -1515,8 +1515,8 @@ fn mark_terms(cells: &mut [Cell], terms: &[String]) {
 }
 
 /// A highlighted line in pieces of at most `room` characters, broken after
-/// the last space that fits (unless that leaves a piece mostly empty: a long
-/// token breaks where it must).
+/// the last space that fits, so a word moves to the next piece whole. Only
+/// a word longer than `room` breaks inside, where it must.
 fn word_chunks<T>(line: &[(char, T)], room: usize) -> Vec<&[(char, T)]> {
     if line.is_empty() {
         return vec![line];
@@ -1527,7 +1527,6 @@ fn word_chunks<T>(line: &[(char, T)], room: usize) -> Vec<&[(char, T)]> {
         let mut take = room.min(line.len() - i);
         if i + take < line.len()
             && let Some(sp) = line[i..i + take].iter().rposition(|(c, _)| *c == ' ')
-            && sp >= room / 2
         {
             take = sp + 1;
         }
@@ -1596,9 +1595,10 @@ pub(super) fn diff_syntax(code: &str, path: &str) -> Vec<Vec<axel_tui::diff::Syn
     }).collect()
 }
 
-/// `text` wrapped to `width` (by characters, so paths and commands break
-/// anywhere), each line led by `indent` (a title's continuation lines by
-/// `indent` alone, its first by nothing), all in `style`.
+/// `text` wrapped to `width` after the last space that fits (as
+/// [`word_chunks`]: only a word or path longer than the line breaks inside),
+/// each line led by `indent` (a title's continuation lines by `indent`
+/// alone, its first by nothing), all in `style`.
 fn wrap_plain(text: &str, width: usize, indent: &str, style: &str) -> String {
     wrap_linked(text, None, width, indent, style)
 }
@@ -1615,11 +1615,10 @@ fn wrap_linked(text: &str, url: Option<&str>, width: usize, indent: &str, style:
             let room = width.saturating_sub(pfx.chars().count()).max(10);
             let mut take = room.min(chars.len() - i);
             debug_assert!(take > 0 || chars.is_empty(), "each round takes a character, so the loop ends");
-            // Break after the last space that fits, unless that leaves the line
-            // mostly empty (a long path or token breaks where it must).
+            // Break after the last space that fits; a path or token longer
+            // than the line breaks where it must.
             if i + take < chars.len()
                 && let Some(sp) = chars[i..i + take].iter().rposition(|c| *c == ' ')
-                && sp >= room / 2
             {
                 take = sp + 1;
             }
@@ -2122,6 +2121,15 @@ mod tests {
         let cells: Vec<(char, ())> = "with --account kept as a visible alias".chars().map(|c| (c, ())).collect();
         let pieces: Vec<String> = word_chunks(&cells, 16).iter().map(|p| p.iter().map(|(c, _)| *c).collect()).collect();
         assert_eq!(pieces, vec!["with --account ", "kept as a ", "visible alias"]);
+        // A word that fits on the next piece moves there whole, however early the
+        // last space falls; only a word longer than the piece breaks inside.
+        let cells: Vec<(char, ())> = "ab cdefghijk lm".chars().map(|c| (c, ())).collect();
+        let pieces: Vec<String> = word_chunks(&cells, 10).iter().map(|p| p.iter().map(|(c, _)| *c).collect()).collect();
+        assert_eq!(pieces, vec!["ab ", "cdefghijk ", "lm"]);
+        let cells: Vec<(char, ())> = "a bcdefghijklmn".chars().map(|c| (c, ())).collect();
+        let pieces: Vec<String> = word_chunks(&cells, 10).iter().map(|p| p.iter().map(|(c, _)| *c).collect()).collect();
+        assert_eq!(pieces, vec!["a ", "bcdefghijk", "lmn"]);
+        assert_eq!(plain(&wrap_plain("see crates/tui/src/input.rs now", 24, "", "")), "see\ncrates/tui/src/input.rs\nnow\n", "a path that fits isn't cut");
         // A heredoc writing Markdown: headings and bold come out bold.
         let md = command_block("cat >> /tmp/543.md <<'EOF'\n## Also in this PR\n- **bold** and `code`\nEOF", 100);
         assert!(md.contains("\x1b[1m## Also in this PR") || md.contains("\x1b[1mAlso in this PR") || md.matches("\x1b[1m").count() >= 2, "{md:?}");

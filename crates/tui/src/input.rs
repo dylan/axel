@@ -574,7 +574,9 @@ pub(crate) fn input_rows(chars: &[char], width: usize, cursor: usize) -> (Vec<(u
     for (r, &(s, e)) in rows.iter().enumerate() {
         let last_of_line = rows.get(r + 1).is_none_or(|&(ns, _)| ns != e);
         if cursor >= s && (cursor < e || (cursor == e && (last_of_line || e == s))) {
-            at = Some((r, chars[s..cursor].iter().map(|&c| char_width(c)).sum()));
+            // On the spaces a row ends with, past its edge: at the edge.
+            let col: usize = chars[s..cursor].iter().map(|&c| char_width(c)).sum();
+            at = Some((r, col.min(width)));
             break;
         }
     }
@@ -583,18 +585,35 @@ pub(crate) fn input_rows(chars: &[char], width: usize, cursor: usize) -> (Vec<(u
 }
 
 /// Where a row starting at `start` ends, before `line_end`, to fit in
-/// `width` cells, and the cells it takes. A character wider than the whole
-/// row still takes one, so every row moves on.
+/// `width` cells, and the cells it takes. Rows break after a space, as the
+/// thread wraps a sent message, so a word moves to the next row whole; the
+/// spaces at a break stay on the row they end, past its edge if they must.
+/// CJK needs no space to break, so a row can also end on either side of a
+/// wide character. Only a word wider than the whole row breaks inside, and
+/// a character wider than the row still takes one, so every row moves on.
 fn row_end(chars: &[char], start: usize, line_end: usize, width: usize) -> (usize, usize) {
     let mut used = 0usize;
     let mut e = start;
+    // The last place this row could end: (index, cells up to it).
+    let mut wrap_at: Option<(usize, usize)> = None;
     while e < line_end {
-        let w = char_width(chars[e]);
+        let c = chars[e];
+        let w = char_width(c);
+        if c == ' ' {
+            used += w;
+            e += 1;
+            wrap_at = Some((e, used));
+            continue;
+        }
         if used + w > width && e > start {
-            break;
+            // Before a wide character is itself a place to break.
+            return if w > 1 { (e, used) } else { wrap_at.unwrap_or((e, used)) };
         }
         used += w;
         e += 1;
+        if w > 1 {
+            wrap_at = Some((e, used));
+        }
     }
     (e, used)
 }
@@ -846,6 +865,33 @@ mod tests {
         let t = TextInput::with_text("修复登录错误");
         assert_eq!(t.view(5), ("错误".to_string(), 4));
         assert_eq!(t.view(20), ("修复登录错误".to_string(), 12));
+    }
+
+    #[test]
+    fn rows_break_between_words_not_inside_them() {
+        let rows = |s: &str, w: usize| {
+            let chars: Vec<char> = s.chars().collect();
+            input_rows(&chars, w, 0).0.iter().map(|&(a, b)| chars[a..b].iter().collect::<String>()).collect::<Vec<_>>()
+        };
+        // The breaks a sent message gets in the thread (`thread_view::wrap`).
+        assert_eq!(rows("a bb ccc dddd", 6), ["a bb ", "ccc ", "dddd"]);
+        assert_eq!(crate::view::thread_view::wrap("a bb ccc dddd", 6), ["a bb", "ccc", "dddd"]);
+        // A word that fills the row keeps the space after it, past the edge.
+        assert_eq!(rows("hello world", 5), ["hello ", "world", ""]);
+        // Only a word wider than the row breaks inside.
+        assert_eq!(rows("ab verylongword", 6), ["ab ", "verylo", "ngword", ""]);
+        // On the space past the edge, the cursor stays at the edge.
+        let chars: Vec<char> = "hello  world".chars().collect();
+        assert_eq!(input_rows(&chars, 5, 6).1, (0, 5));
+        assert_eq!(input_rows(&chars, 5, 7).1, (1, 0));
+        // ↑/↓ walk the same rows.
+        let mut t = TextInput::with_text("hello world!");
+        t.left();
+        t.left();
+        assert!(t.screen_line(6, true));
+        assert_eq!(t.cursor(), 4, "four cells into `world!` is four into `hello `");
+        assert!(t.screen_line(6, false));
+        assert_eq!(t.cursor(), 10);
     }
 
     /// The cases from issue #24 (CJK input in the launcher and composer).
